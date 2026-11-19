@@ -1,0 +1,4580 @@
+--@name SOLACE — Visual Animation & Effects Studio
+--@author SOLACE Team
+--@shared
+--[[
+    SOLACE — Visual Animation & Effects Studio for Garry's Mod (StarfallEx)
+    Create. Animate. Visualize. Export.
+
+    Self-contained single-file StarfallEx application (Phases 1 & 2 consolidated).
+    Self-contained: zero external includes or project dependencies.
+
+    Controls (Phase 1 & 2):
+      - F6            : Toggle SOLACE Studio open / minimized
+      - Hold RMB      : Look around in 3D Freecam (release to restore cursor)
+      - WASD          : Move Freecam horizontally
+      - Space / Ctrl  : Move Freecam up / down
+      - Shift         : Boost Freecam movement speed
+      - Mouse Wheel   : Adjust Freecam speed (viewport) / scroll / zoom timeline
+      - Left Click    : Select 3D object (Ctrl+Click for multi-select; empty to clear)
+      - F             : Focus Freecam on selected object
+      - Delete        : Delete selected object(s)
+      - G             : Toggle 3D reference grid
+      - Q             : Select tool
+]]
+
+local SOLACE = {}
+
+-- ============================================================================
+-- SECTION 1: Bootstrap and permissions
+-- ============================================================================
+if SERVER then
+    -- Singleplayer / Sandbox-first: automatically attach owner HUD on spawn/use
+    local function attachOwnerHud(ply)
+        if isValid(ply) and ply == owner() then
+            pcall(enableHud, ply, true)
+        end
+    end
+
+    hook.add("ClientInitialized", "solace_sv_init_hud", function(ply)
+        attachOwnerHud(ply)
+    end)
+
+    hook.add("StarfallUsed", "solace_sv_used_hud", function(activator, used)
+        if used == chip() then
+            attachOwnerHud(activator)
+        end
+    end)
+
+    timer.simple(0.1, function()
+        attachOwnerHud(owner())
+    end)
+
+    return
+end
+
+setupPermissionRequest({
+    "render.hud",
+    "render.calcview",
+    "hologram.create",
+    "material.load",
+    "input",
+    "input.enablecursor",
+    "file.read",
+    "file.write",
+    "file.findInGame",
+}, "SOLACE Studio requires HUD rendering, Freecam view control, cursor input, clientside holograms, and asset access.", true)
+
+-- ============================================================================
+-- SECTION 2: Constants and configuration
+-- ============================================================================
+(function(SOLACE)
+
+    local Constants = {}
+
+    Constants.APP_NAME = "SOLACE"
+    Constants.APP_SUBTITLE = "Visual Animation & Effects Studio"
+    Constants.APP_TAGLINE = "Create. Animate. Visualize. Export."
+    Constants.VERSION = "0.2.0-phase2"
+    Constants.IR_SCHEMA_VERSION = 1
+
+    -- Node types supported by the Scene Intermediate Representation (IR)
+    Constants.NODE_KINDS = {
+        ROOT = "root",
+        FOLDER = "folder",
+        GROUP = "group",
+        MODEL = "model",
+        HOLOGRAM = "hologram",
+        RAGDOLL = "ragdoll",
+        SPRITE = "sprite",
+        PARTICLE = "particle",
+        EFFECT = "effect",
+        LIGHT = "light",
+        DECAL = "decal",
+        CAMERA = "camera",
+    }
+
+    -- Easing curve identifiers reserved in the IR for Phase 8+
+    Constants.EASING = {
+        LINEAR = "linear",
+        EASE_IN_QUAD = "inQuad",
+        EASE_OUT_QUAD = "outQuad",
+        EASE_IN_OUT_QUAD = "inOutQuad",
+        EASE_IN_CUBIC = "inCubic",
+        EASE_OUT_CUBIC = "outCubic",
+        EASE_IN_OUT_CUBIC = "inOutCubic",
+        STEP = "step",
+    }
+
+    -- Tool definitions (explicitly tagging implementation phase)
+    Constants.TOOLS = {
+        { id = "select", label = "Select", icon = "cursor", phase = 2, ready = true,  hotkey = "Q", desc = "Select objects in 3D viewport (Click, Ctrl+Click multi-select, F: Focus)" },
+        { id = "move",   label = "Move",   icon = "move",   phase = 3, ready = false, hotkey = "W", desc = "3D Translation Gizmo — Arriving in Phase 3" },
+        { id = "rotate", label = "Rotate", icon = "rotate", phase = 3, ready = false, hotkey = "E", desc = "3D Rotation Gizmo — Arriving in Phase 3" },
+        { id = "scale",  label = "Scale",  icon = "scale",  phase = 3, ready = false, hotkey = "R", desc = "3D Scale Gizmo — Arriving in Phase 3" },
+        { id = "pivot",  label = "Pivot",  icon = "pivot",  phase = 5, ready = false, hotkey = "T", desc = "Custom Pivot Editor — Arriving in Phase 5" },
+    }
+
+    -- Toolbox categories (populated incrementally; full mounted scanner in Phase 6)
+    Constants.ASSET_CATEGORIES = {
+        { id = "models",    label = "Models",    icon = "cube",    desc = "Mounted .mdl props & starter primitives (Full scanner in Phase 6)" },
+        { id = "sprites",   label = "Sprites",   icon = "sparkle", desc = "Billboard 3D sprites (Full editor in Phase 7)" },
+        { id = "materials", label = "Materials", icon = "layers",  desc = "Surface & model materials (Phase 6)" },
+        { id = "decals",    label = "Decals",    icon = "stamp",   desc = "Surface decals & animated overlays (Phase 6/7)" },
+        { id = "effects",   label = "Effects",   icon = "burst",   desc = "VFX presets, particles & shockwaves (Phase 10)" },
+        { id = "holograms", label = "Holograms", icon = "holo",    desc = "Clientside hologram primitives & assemblies (Phase 5/7)" },
+    }
+
+    -- Curated starter models commonly mounted in Garry's Mod / HL2 (validated via game.modelExists at runtime)
+    Constants.STARTER_MODELS = {
+        { name = "Cube (1x1)",      model = "models/hunter/blocks/cube1x1x1.mdl" },
+        { name = "Cube (0.5)",      model = "models/hunter/blocks/cube05x05x05.mdl" },
+        { name = "Sphere",          model = "models/hunter/misc/sphere075x075.mdl" },
+        { name = "Cylinder",        model = "models/hunter/tubes/tube1x1x1.mdl" },
+        { name = "Plate (2x2)",     model = "models/hunter/plates/plate2x2.mdl" },
+        { name = "Oil Barrel",      model = "models/props_c17/oildrum001.mdl" },
+        { name = "Wooden Crate",    model = "models/props_junk/wood_crate001a.mdl" },
+        { name = "Chair",           model = "models/props_c17/furniturechair001a.mdl" },
+        { name = "Traffic Cone",    model = "models/props_junk/trafficcone001a.mdl" },
+        { name = "Sawblade",        model = "models/props_junk/sawblade001a.mdl" },
+        { name = "Combine Soldier", model = "models/player/combine_soldier.mdl" },
+        { name = "Dr. Kleiner",     model = "models/player/kleiner.mdl" },
+        { name = "G-Man",           model = "models/player/gman_high.mdl" },
+    }
+
+    Constants.STARTER_SPRITES = {
+        { name = "Glow Sprite",  material = "sprites/light_glow02_add" },
+        { name = "Flare Sprite", material = "sprites/glow04_noz" },
+        { name = "Phys Ring",    material = "sprites/physg_glow1" },
+    }
+
+    -- Grid defaults (Hammer units)
+    Constants.GRID_SPACING_OPTIONS = { 16, 32, 64, 128 }
+    Constants.ORIGIN_MODES = { "chip", "player", "world" }
+
+    -- Timeline defaults
+    Constants.FPS_OPTIONS = { 24, 30, 60 }
+
+    -- Camera defaults
+    Constants.CAMERA_DEFAULTS = {
+        speed = 450,
+        minSpeed = 40,
+        maxSpeed = 3000,
+        boostMult = 3.0,
+        sensitivity = 0.16,
+        fov = 80,
+        smoothing = 16.0,
+        focusPadding = 1.45,
+    }
+
+    -- Default dock layout sizes (pixels) & bounds
+    Constants.LAYOUT_DEFAULTS = {
+        toolbarHeight = 40,
+        leftWidth = 256,
+        rightWidth = 300,
+        bottomHeight = 192,
+        explorerRatio = 0.46,
+
+        minLeftWidth = 180,
+        maxLeftWidth = 420,
+        minRightWidth = 220,
+        maxRightWidth = 480,
+        minBottomHeight = 132,
+        maxBottomHeight = 420,
+        minExplorerRatio = 0.22,
+        maxExplorerRatio = 0.78,
+        minViewportWidth = 320,
+        minViewportHeight = 200,
+        splitterSize = 5,
+    }
+
+    -- Default runtime state factory
+    function Constants.createDefaultState()
+        return {
+            studioOpen = true,
+            viewportLooking = false,
+            activeTool = "select",
+            activeToolboxCategory = "models",
+            toolboxSearch = "",
+            explorerSearch = "",
+            customModelPath = "models/props_c17/oildrum001.mdl",
+            spawnDistance = 140,
+
+            -- Freecam settings
+            camera = {
+                speed = Constants.CAMERA_DEFAULTS.speed,
+                boostMult = Constants.CAMERA_DEFAULTS.boostMult,
+                sensitivity = Constants.CAMERA_DEFAULTS.sensitivity,
+                fov = Constants.CAMERA_DEFAULTS.fov,
+                smoothing = Constants.CAMERA_DEFAULTS.smoothing,
+            },
+
+            -- Viewport & grid settings
+            grid = {
+                enabled = true,
+                showAxes = true,
+                showOriginMarker = true,
+                showTelemetry = true,
+                showOrientationGizmo = true,
+                spacing = 32,
+                halfExtents = 10,
+                majorEvery = 4,
+                originMode = "chip",
+                originPos = { 0, 0, 0 },
+                zOffset = 0.25,
+            },
+
+            -- Timeline state
+            timeline = {
+                currentTime = 0.0,
+                duration = 10.0,
+                fps = 30,
+                zoom = 80,
+                scrollTime = 0.0,
+                playing = false,
+                loop = true,
+            },
+
+            -- Panel visibility toggles
+            panels = {
+                toolbox = true,
+                explorer = true,
+                properties = true,
+                timeline = true,
+            },
+
+            -- Property section collapse state
+            sections = {
+                selection = true,
+                camera = true,
+                grid = true,
+                origin = false,
+                quotas = false,
+            },
+        }
+    end
+
+
+    SOLACE.Constants = Constants
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 3: Core utilities
+-- ============================================================================
+(function(SOLACE)
+    local Utils = {}
+    local _modelExistsCache = {}
+
+    function Utils.sanitizeExportName(name)
+        local clean = string.gsub(string.lower(name or "node"), "[^%w_]+", "_")
+        clean = string.gsub(clean, "^_+", "")
+        clean = string.gsub(clean, "_+$", "")
+        if clean == "" or string.match(clean, "^%d") then
+            clean = "obj_" .. clean
+        end
+        return clean
+    end
+
+    function Utils.cycleOption(options, current, dir)
+        local idx = 1
+        for i, v in ipairs(options) do
+            if v == current then idx = i break end
+        end
+        idx = ((idx - 1 + dir) % #options) + 1
+        return options[idx]
+    end
+
+    function Utils.fmtVec3(v, dec)
+        local f = "%." .. (dec or 1) .. "f, %." .. (dec or 1) .. "f, %." .. (dec or 1) .. "f"
+        return string.format(f, v[1] or 0, v[2] or 0, v[3] or 0)
+    end
+
+    function Utils.formatTimecode(t)
+        local mins = math.floor(t / 60)
+        local secs = t - mins * 60
+        return string.format("%02d:%05.2f", mins, secs)
+    end
+
+    function Utils.checkModelMounted(path)
+        if not path or path == "" then return false end
+        local cached = _modelExistsCache[path]
+        if cached ~= nil then return cached end
+        local ok = game.modelExists(path)
+        _modelExistsCache[path] = ok
+        return ok
+    end
+
+    SOLACE.Utils = Utils
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 4: Event system
+-- ============================================================================
+(function(SOLACE)
+
+    local Events = {}
+    Events.__index = Events
+
+    function Events.new()
+        return setmetatable({
+            _listeners = {},
+        }, Events)
+    end
+
+    function Events:on(eventName, id, fn)
+        local bucket = self._listeners[eventName]
+        if not bucket then
+            bucket = {}
+            self._listeners[eventName] = bucket
+        end
+        bucket[id] = fn
+    end
+
+    function Events:off(eventName, id)
+        local bucket = self._listeners[eventName]
+        if bucket then
+            bucket[id] = nil
+        end
+    end
+
+    function Events:emit(eventName, ...)
+        local bucket = self._listeners[eventName]
+        if not bucket then return end
+        for _, fn in pairs(bucket) do
+            fn(...)
+        end
+    end
+
+
+    SOLACE.Events = Events
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 5: Command and undo/redo system
+-- ============================================================================
+(function(SOLACE)
+
+    local Commands = {}
+    Commands.__index = Commands
+
+    function Commands.new(events, maxHistory)
+        return setmetatable({
+            _events = events,
+            _undoStack = {},
+            _redoStack = {},
+            _maxHistory = maxHistory or 100,
+        }, Commands)
+    end
+
+    function Commands:execute(cmd)
+        if not cmd or type(cmd.redo) ~= "function" or type(cmd.undo) ~= "function" then
+            return false
+        end
+
+        cmd:redo()
+        self._undoStack[#self._undoStack + 1] = cmd
+        self._redoStack = {}
+
+        if #self._undoStack > self._maxHistory then
+            table.remove(self._undoStack, 1)
+        end
+
+        if self._events then
+            self._events:emit("historyChanged", self)
+        end
+        return true
+    end
+
+    function Commands:canUndo()
+        return #self._undoStack > 0
+    end
+
+    function Commands:canRedo()
+        return #self._redoStack > 0
+    end
+
+    function Commands:getUndoLabel()
+        local top = self._undoStack[#self._undoStack]
+        return top and top.label or nil
+    end
+
+    function Commands:getRedoLabel()
+        local top = self._redoStack[#self._redoStack]
+        return top and top.label or nil
+    end
+
+    function Commands:undo()
+        local idx = #self._undoStack
+        if idx == 0 then return false end
+        local cmd = self._undoStack[idx]
+        self._undoStack[idx] = nil
+        cmd:undo()
+        self._redoStack[#self._redoStack + 1] = cmd
+        if self._events then
+            self._events:emit("historyChanged", self)
+        end
+        return true
+    end
+
+    function Commands:redo()
+        local idx = #self._redoStack
+        if idx == 0 then return false end
+        local cmd = self._redoStack[idx]
+        self._redoStack[idx] = nil
+        cmd:redo()
+        self._undoStack[#self._undoStack + 1] = cmd
+        if self._events then
+            self._events:emit("historyChanged", self)
+        end
+        return true
+    end
+
+    function Commands:clear()
+        self._undoStack = {}
+        self._redoStack = {}
+        if self._events then
+            self._events:emit("historyChanged", self)
+        end
+    end
+
+
+    SOLACE.Commands = Commands
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 6: Scene IR
+-- ============================================================================
+(function(SOLACE)
+    local Constants = SOLACE.Constants
+
+
+
+    local IR = {}
+
+    local function vec3(x, y, z)
+        return { x or 0, y or 0, z or 0 }
+    end
+
+    local function ang3(p, y, r)
+        return { p or 0, y or 0, r or 0 }
+    end
+
+    local function rgba(r, g, b, a)
+        return { r or 255, g or 255, b or 255, a or 255 }
+    end
+
+    function IR.cloneVec3(v)
+        return { v[1] or 0, v[2] or 0, v[3] or 0 }
+    end
+
+    function IR.cloneColor(c)
+        return { c[1] or 255, c[2] or 255, c[3] or 255, c[4] or 255 }
+    end
+
+    -- Runtime Starfall object conversions (used only by adapters/viewport, never stored in IR)
+    function IR.toVector(v)
+        return Vector(v[1] or 0, v[2] or 0, v[3] or 0)
+    end
+
+    function IR.toAngle(a)
+        return Angle(a[1] or 0, a[2] or 0, a[3] or 0)
+    end
+
+    function IR.toColor(c)
+        return Color(c[1] or 255, c[2] or 255, c[3] or 255, c[4] or 255)
+    end
+
+    function IR.fromVector(v)
+        return { v.x, v.y, v.z }
+    end
+
+    function IR.fromAngle(a)
+        return { a.p, a.y, a.r }
+    end
+
+    function IR.fromColor(c)
+        return { c.r, c.g, c.b, c.a }
+    end
+
+    function IR.createTransform(opts)
+        opts = opts or {}
+        return {
+            pos   = opts.pos   and IR.cloneVec3(opts.pos)   or vec3(0, 0, 0),
+            ang   = opts.ang   and IR.cloneVec3(opts.ang)   or ang3(0, 0, 0),
+            scale = opts.scale and IR.cloneVec3(opts.scale) or vec3(1, 1, 1),
+            pivot = opts.pivot and IR.cloneVec3(opts.pivot) or vec3(0, 0, 0),
+        }
+    end
+
+    function IR.createAppearance(opts)
+        opts = opts or {}
+        return {
+            model = opts.model or "",
+            material = opts.material or "",
+            submaterials = opts.submaterials or {},
+            color = opts.color and IR.cloneColor(opts.color) or rgba(255, 255, 255, 255),
+            renderMode = opts.renderMode or 0,
+            renderFX = opts.renderFX or 0,
+            skin = opts.skin or 0,
+            bodygroups = opts.bodygroups or {},
+            clips = opts.clips or {},
+            suppressLighting = opts.suppressLighting or false,
+        }
+    end
+
+    function IR.createKeyframe(time, value, easing)
+        return {
+            time = time or 0,
+            value = value,
+            easing = easing or Constants.EASING.LINEAR,
+        }
+    end
+
+    function IR.createTrack(propertyPath)
+        return {
+            property = propertyPath,
+            enabled = true,
+            keyframes = {},
+        }
+    end
+
+    function IR.createNode(opts)
+        opts = opts or {}
+        local kind = opts.kind or Constants.NODE_KINDS.MODEL
+
+        local node = {
+            id = opts.id or "",
+            name = opts.name or "Node",
+            exportName = opts.exportName or "",
+            kind = kind,
+            parentId = opts.parentId,       -- nil only on root
+            children = opts.children or {}, -- ordered array of child node IDs
+            visible = opts.visible ~= false,
+            locked = opts.locked or false,
+            expanded = opts.expanded ~= false,
+            description = opts.description or "",
+            tags = opts.tags or {},
+
+            transform = IR.createTransform(opts.transform),
+            appearance = IR.createAppearance(opts.appearance),
+
+            physics = {
+                enabled = false,
+                frozen = true,
+                mass = 50,
+                gravity = true,
+                material = "",
+            },
+
+            -- Specialized payload blocks (populated for sprite, light, effect, ragdoll, camera)
+            sprite = nil,
+            light = nil,
+            effect = nil,
+            bones = nil,
+            camera = nil,
+
+            -- Animation tracks keyed by property path (e.g. "transform.pos", "appearance.color")
+            tracks = opts.tracks or {},
+        }
+
+        if kind == Constants.NODE_KINDS.CAMERA then
+            node.camera = {
+                fov = (opts.camera and opts.camera.fov) or 80,
+                shakeAmplitude = 0,
+                shakeFrequency = 0,
+                shakeDuration = 0,
+            }
+        elseif kind == Constants.NODE_KINDS.SPRITE then
+            node.sprite = {
+                width = 32,
+                height = 32,
+                roll = 0,
+                spawnTime = 0,
+                lifetime = 0, -- 0 = persistent
+                fadeIn = 0,
+                fadeOut = 0,
+                additive = false,
+            }
+        elseif kind == Constants.NODE_KINDS.LIGHT then
+            node.light = {
+                size = 256,
+                brightness = 2,
+                decay = 1000,
+                projected = false,
+                fov = 60,
+            }
+        end
+
+        return node
+    end
+
+    function IR.createProject(opts)
+        opts = opts or {}
+        local rootId = "root"
+        local rootNode = IR.createNode({
+            id = rootId,
+            name = opts.name or "Untitled Scene",
+            kind = Constants.NODE_KINDS.ROOT,
+            parentId = nil,
+            expanded = true,
+            description = "Root container for SOLACE scene hierarchy",
+        })
+
+        return {
+            schemaVersion = Constants.IR_SCHEMA_VERSION,
+            app = Constants.APP_NAME,
+            name = opts.name or "Untitled Scene",
+            author = opts.author or "",
+            createdAt = opts.createdAt or os.time(),
+            modifiedAt = opts.modifiedAt or os.time(),
+            nextId = 1,
+            timeline = {
+                fps = 30,
+                duration = 10.0,
+            },
+            origin = { 0, 0, 0 },
+            rootId = rootId,
+            nodes = {
+                [rootId] = rootNode,
+            },
+            presets = {},
+        }
+    end
+
+
+    SOLACE.IR = IR
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 7: Scene graph
+-- ============================================================================
+(function(SOLACE)
+    local Constants = SOLACE.Constants
+    local Utils = SOLACE.Utils
+    local IR = SOLACE.IR
+
+
+
+    local SceneGraph = {}
+    SceneGraph.__index = SceneGraph
+
+    function SceneGraph.new(events)
+        local self = setmetatable({
+            _events = events,
+            _project = IR.createProject({ name = "Untitled Scene" }),
+            _selectedIds = {},
+            _selectedMap = {},
+            _primarySelectedId = nil,
+            _dirty = false,
+        }, SceneGraph)
+
+        -- Create initial StudioCamera IR node
+        local cam = self:addNode({
+            name = "StudioCamera",
+            kind = Constants.NODE_KINDS.CAMERA,
+            parentId = self._project.rootId,
+            description = "Primary editor & cinematic camera actor",
+        })
+        self:setSelectedId(cam.id)
+
+        return self
+    end
+
+    function SceneGraph:getProject()
+        return self._project
+    end
+
+    function SceneGraph:getRootId()
+        return self._project.rootId
+    end
+
+    function SceneGraph:getNode(id)
+        if not id then return nil end
+        return self._project.nodes[id]
+    end
+
+    function SceneGraph:getAllNodes()
+        return self._project.nodes
+    end
+
+    -- Selection API (supports both primary single selection and multi-selection)
+    function SceneGraph:getSelectedId()
+        return self._primarySelectedId
+    end
+
+    function SceneGraph:getSelectedNode()
+        return self._primarySelectedId and self._project.nodes[self._primarySelectedId] or nil
+    end
+
+    function SceneGraph:getSelectedIds()
+        return self._selectedIds
+    end
+
+    function SceneGraph:isSelected(id)
+        return id ~= nil and self._selectedMap[id] == true
+    end
+
+    function SceneGraph:clearSelection()
+        if #self._selectedIds == 0 and self._primarySelectedId == nil then return end
+        self._selectedIds = {}
+        self._selectedMap = {}
+        self._primarySelectedId = nil
+        if self._events then
+            self._events:emit("selectionChanged", nil, nil, self._selectedIds)
+        end
+    end
+
+    function SceneGraph:setSelectedId(id)
+        if id == nil then
+            self:clearSelection()
+            return
+        end
+        if not self._project.nodes[id] then return end
+        if #self._selectedIds == 1 and self._primarySelectedId == id then return end
+
+        self._selectedIds = { id }
+        self._selectedMap = { [id] = true }
+        self._primarySelectedId = id
+        if self._events then
+            self._events:emit("selectionChanged", id, self:getNode(id), self._selectedIds)
+        end
+    end
+
+    function SceneGraph:toggleSelectedId(id)
+        if not id or not self._project.nodes[id] then return end
+        if self._selectedMap[id] then
+            self._selectedMap[id] = nil
+            for i = #self._selectedIds, 1, -1 do
+                if self._selectedIds[i] == id then
+                    table.remove(self._selectedIds, i)
+                    break
+                end
+            end
+            if self._primarySelectedId == id then
+                self._primarySelectedId = self._selectedIds[#self._selectedIds]
+            end
+        else
+            self._selectedMap[id] = true
+            self._selectedIds[#self._selectedIds + 1] = id
+            self._primarySelectedId = id
+        end
+
+        if self._events then
+            self._events:emit("selectionChanged", self._primarySelectedId, self:getSelectedNode(), self._selectedIds)
+        end
+    end
+
+    function SceneGraph:isDirty()
+        return self._dirty
+    end
+
+    function SceneGraph:markDirty()
+        self._dirty = true
+        self._project.modifiedAt = os.time()
+        if self._events then
+            self._events:emit("sceneDirty", self._project)
+        end
+    end
+
+    function SceneGraph:generateId(prefix)
+        local idx = self._project.nextId
+        self._project.nextId = idx + 1
+        return string.format("%s_%04d", prefix or "node", idx)
+    end
+
+    function SceneGraph:addNode(opts)
+        opts = opts or {}
+        local parentId = opts.parentId or self._project.rootId
+        local parent = self._project.nodes[parentId]
+        if not parent then
+            parentId = self._project.rootId
+            parent = self._project.nodes[parentId]
+        end
+
+        local id = opts.id
+        if not id or id == "" or self._project.nodes[id] then
+            id = self:generateId(opts.kind or "node")
+        end
+
+        local node = IR.createNode(opts)
+        node.id = id
+        node.parentId = parentId
+        if node.exportName == "" then
+            node.exportName = Utils.sanitizeExportName(node.name) .. "_" .. string.sub(id, -4)
+        end
+
+        self._project.nodes[id] = node
+        parent.children[#parent.children + 1] = id
+
+        self:markDirty()
+        if self._events then
+            self._events:emit("nodeAdded", node)
+        end
+        return node
+    end
+
+    function SceneGraph:createModel(name, modelPath, posTbl, angTbl, parentId)
+        return self:addNode({
+            name = name or "Model",
+            kind = Constants.NODE_KINDS.MODEL,
+            parentId = parentId or self._project.rootId,
+            transform = {
+                pos = posTbl or { 0, 0, 0 },
+                ang = angTbl or { 0, 0, 0 },
+                scale = { 1, 1, 1 },
+                pivot = { 0, 0, 0 },
+            },
+            appearance = {
+                model = modelPath,
+            },
+        })
+    end
+
+    function SceneGraph:createGroup(name, posTbl, parentId)
+        return self:addNode({
+            name = name or "Group",
+            kind = Constants.NODE_KINDS.GROUP,
+            parentId = parentId or self._project.rootId,
+            transform = {
+                pos = posTbl or { 0, 0, 0 },
+            },
+        })
+    end
+
+    function SceneGraph:createFolder(name, parentId)
+        return self:addNode({
+            name = name or "Folder",
+            kind = Constants.NODE_KINDS.FOLDER,
+            parentId = parentId or self._project.rootId,
+        })
+    end
+
+    function SceneGraph:createSprite(name, materialPath, posTbl, parentId)
+        return self:addNode({
+            name = name or "Sprite",
+            kind = Constants.NODE_KINDS.SPRITE,
+            parentId = parentId or self._project.rootId,
+            transform = {
+                pos = posTbl or { 0, 0, 0 },
+            },
+            appearance = {
+                material = materialPath or "sprites/light_glow02_add",
+            },
+        })
+    end
+
+    function SceneGraph:removeNode(id)
+        if not id or id == self._project.rootId then return false end
+        local node = self._project.nodes[id]
+        if not node then return false end
+
+        -- Gather entire subtree IDs post-order
+        local removedIds = {}
+        local function collect(nid)
+            local n = self._project.nodes[nid]
+            if not n then return end
+            for i = 1, #n.children do
+                collect(n.children[i])
+            end
+            removedIds[#removedIds + 1] = nid
+        end
+        collect(id)
+
+        -- Detach from parent's children array
+        local parent = node.parentId and self._project.nodes[node.parentId]
+        if parent then
+            for i = #parent.children, 1, -1 do
+                if parent.children[i] == id then
+                    table.remove(parent.children, i)
+                    break
+                end
+            end
+        end
+
+        local selChanged = false
+        for _, rid in ipairs(removedIds) do
+            self._project.nodes[rid] = nil
+            if self._selectedMap[rid] then
+                self._selectedMap[rid] = nil
+                selChanged = true
+            end
+        end
+
+        if selChanged then
+            for i = #self._selectedIds, 1, -1 do
+                if not self._selectedMap[self._selectedIds[i]] then
+                    table.remove(self._selectedIds, i)
+                end
+            end
+            if not self._selectedMap[self._primarySelectedId] then
+                self._primarySelectedId = self._selectedIds[#self._selectedIds]
+            end
+        end
+
+        self:markDirty()
+        if self._events then
+            self._events:emit("nodeRemoved", removedIds)
+            if selChanged then
+                self._events:emit("selectionChanged", self._primarySelectedId, self:getSelectedNode(), self._selectedIds)
+            end
+        end
+        return true
+    end
+
+    function SceneGraph:renameNode(id, newName)
+        local node = self:getNode(id)
+        if not node or not newName then return false end
+        local trimmed = string.trim(newName)
+        if trimmed == "" then return false end
+        node.name = trimmed
+        if id == self._project.rootId then
+            self._project.name = trimmed
+        else
+            node.exportName = Utils.sanitizeExportName(trimmed) .. "_" .. string.sub(id, -4)
+        end
+        self:markDirty()
+        if self._events then
+            self._events:emit("nodeUpdated", node)
+        end
+        return true
+    end
+
+    function SceneGraph:toggleNodeVisible(id)
+        if not id or id == self._project.rootId then return false end
+        local node = self:getNode(id)
+        if not node then return false end
+        node.visible = not node.visible
+        self:markDirty()
+        if self._events then
+            self._events:emit("nodeUpdated", node)
+        end
+        return true
+    end
+
+    function SceneGraph:notifyNodeUpdated(id)
+        local node = self:getNode(id)
+        if not node then return end
+        self:markDirty()
+        if self._events then
+            self._events:emit("nodeUpdated", node)
+        end
+    end
+
+    function SceneGraph:getNodeCount()
+        local count = 0
+        for id in pairs(self._project.nodes) do
+            if id ~= self._project.rootId then
+                count = count + 1
+            end
+        end
+        return count
+    end
+
+    -- Flattened depth-first list for Explorer rendering (respects expanded state & optional search filter)
+    function SceneGraph:getFlatHierarchy(searchQuery)
+        local out = {}
+        local q = searchQuery and string.lower(string.trim(searchQuery)) or ""
+        local hasQuery = q ~= ""
+
+        local function matches(node)
+            if not hasQuery then return true end
+            return string.find(string.lower(node.name), q, 1, true) ~= nil
+                or string.find(string.lower(node.kind), q, 1, true) ~= nil
+        end
+
+        local function subtreeMatches(node)
+            if matches(node) then return true end
+            for _, childId in ipairs(node.children) do
+                local child = self._project.nodes[childId]
+                if child and subtreeMatches(child) then
+                    return true
+                end
+            end
+            return false
+        end
+
+        local function walk(nodeId, depth)
+            local node = self._project.nodes[nodeId]
+            if not node then return end
+            if hasQuery and not subtreeMatches(node) then return end
+
+            out[#out + 1] = {
+                node = node,
+                depth = depth,
+                hasChildren = #node.children > 0,
+            }
+
+            if node.expanded or hasQuery then
+                for _, childId in ipairs(node.children) do
+                    walk(childId, depth + 1)
+                end
+            end
+        end
+
+        walk(self._project.rootId, 0)
+        return out
+    end
+
+    function SceneGraph:setOrigin(vecTbl)
+        self._project.origin = IR.cloneVec3(vecTbl)
+        self:markDirty()
+    end
+
+    function SceneGraph:setProjectName(name)
+        self:renameNode(self._project.rootId, name)
+    end
+
+
+    SOLACE.SceneGraph = SceneGraph
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 8: Runtime rendering adapter
+-- ============================================================================
+(function(SOLACE)
+    local Constants = SOLACE.Constants
+    local IR = SOLACE.IR
+
+
+
+    local SceneRuntime = {}
+    SceneRuntime.__index = SceneRuntime
+
+    local DEFAULT_MINS = Vector(-8, -8, -8)
+    local DEFAULT_MAXS = Vector(8, 8, 8)
+
+    function SceneRuntime.new(sceneGraph, events)
+        local self = setmetatable({
+            _scene = sceneGraph,
+            _events = events,
+            _entries = {},       -- [nodeId] = { kind, holo, material, matPath, worldPos, worldAng, worldScale, boundsMin, boundsMax, visible, errorMsg }
+            _dirtyNodes = {},    -- [nodeId] = true
+            _pendingRemove = {}, -- array of nodeIds
+            _matCache = {},      -- [matPath] = LockedMaterial | false
+            _lastError = nil,
+        }, SceneRuntime)
+
+        events:on("nodeAdded", "runtime_sync", function(node)
+            self:markDirty(node.id)
+        end)
+        events:on("nodeUpdated", "runtime_sync", function(node)
+            self:markSubtreeDirty(node.id)
+        end)
+        events:on("nodeRemoved", "runtime_sync", function(removedIds)
+            for _, id in ipairs(removedIds) do
+                self._dirtyNodes[id] = nil
+                self._pendingRemove[#self._pendingRemove + 1] = id
+            end
+        end)
+
+        -- Queue any pre-existing nodes
+        for id in pairs(sceneGraph:getAllNodes()) do
+            if id ~= sceneGraph:getRootId() then
+                self._dirtyNodes[id] = true
+            end
+        end
+
+        return self
+    end
+
+    function SceneRuntime:markDirty(nodeId)
+        if nodeId and nodeId ~= self._scene:getRootId() then
+            self._dirtyNodes[nodeId] = true
+        end
+    end
+
+    function SceneRuntime:markSubtreeDirty(nodeId)
+        local node = self._scene:getNode(nodeId)
+        if not node then return end
+        if node.id ~= self._scene:getRootId() then
+            self._dirtyNodes[node.id] = true
+        end
+        for _, childId in ipairs(node.children) do
+            self:markSubtreeDirty(childId)
+        end
+    end
+
+    function SceneRuntime:getLastError()
+        return self._lastError
+    end
+
+    function SceneRuntime:getEntries()
+        return self._entries
+    end
+
+    function SceneRuntime:getEntry(nodeId)
+        return self._entries[nodeId]
+    end
+
+    function SceneRuntime:_loadMaterialCached(matPath)
+        if not matPath or matPath == "" then return nil end
+        local cached = self._matCache[matPath]
+        if cached ~= nil then
+            return cached ~= false and cached or nil
+        end
+        if not hasPermission("material.load") then
+            return nil
+        end
+        local ok, mat = pcall(material.load, matPath)
+        if ok and mat then
+            self._matCache[matPath] = mat
+            return mat
+        end
+        self._matCache[matPath] = false
+        return nil
+    end
+
+    function SceneRuntime:_destroyEntry(id)
+        local entry = self._entries[id]
+        if not entry then return end
+        if entry.holo and isValid(entry.holo) then
+            pcall(function() entry.holo:remove() end)
+        end
+        self._entries[id] = nil
+    end
+
+    function SceneRuntime:_syncNode(node)
+        local id = node.id
+        local kind = node.kind
+        local entry = self._entries[id]
+
+        local wPos, wAng, wScale = SOLACE.Math3D.computeWorldTransform(self._scene, id)
+        local vis = SOLACE.Math3D.isNodeHierarchyVisible(self._scene, id)
+
+        if kind == Constants.NODE_KINDS.MODEL or kind == Constants.NODE_KINDS.HOLOGRAM then
+            local modelPath = node.appearance.model or ""
+            if modelPath == "" then return end
+
+            if not entry then
+                entry = { kind = kind }
+                self._entries[id] = entry
+            end
+
+            entry.worldPos = wPos
+            entry.worldAng = wAng
+            entry.worldScale = wScale
+            entry.visible = vis
+
+            -- Create or recreate hologram if missing/invalid
+            if not entry.holo or not isValid(entry.holo) then
+                if not hasPermission("hologram.create") then
+                    entry.errorMsg = "Missing hologram.create permission"
+                    self._lastError = entry.errorMsg
+                    return
+                end
+                if not hologram.canSpawn() then
+                    entry.errorMsg = "Hologram limit/burst reached"
+                    self._lastError = entry.errorMsg
+                    return
+                end
+                if not game.modelExists(modelPath) then
+                    entry.errorMsg = "Model not found: " .. modelPath
+                    self._lastError = entry.errorMsg
+                    return
+                end
+
+                local ok, holo = pcall(hologram.create, wPos, wAng, modelPath, wScale)
+                if not ok or not isValid(holo) then
+                    entry.errorMsg = "Failed to spawn hologram: " .. tostring(holo)
+                    self._lastError = entry.errorMsg
+                    return
+                end
+
+                entry.holo = holo
+                entry.model = modelPath
+                entry.errorMsg = nil
+                entry.boundsMin = holo:obbMins() or DEFAULT_MINS
+                entry.boundsMax = holo:obbMaxs() or DEFAULT_MAXS
+            else
+                if entry.model ~= modelPath and game.modelExists(modelPath) then
+                    pcall(function() entry.holo:setModel(modelPath) end)
+                    entry.model = modelPath
+                    entry.boundsMin = entry.holo:obbMins() or DEFAULT_MINS
+                    entry.boundsMax = entry.holo:obbMaxs() or DEFAULT_MAXS
+                end
+                entry.holo:setPos(wPos)
+                entry.holo:setAngles(wAng)
+                entry.holo:setScale(wScale)
+            end
+
+            local holo = entry.holo
+            if isValid(holo) then
+                holo:setNoDraw(not vis)
+                holo:setColor(IR.toColor(node.appearance.color))
+                if node.appearance.material and node.appearance.material ~= "" then
+                    holo:setMaterial(node.appearance.material)
+                end
+            end
+        elseif kind == Constants.NODE_KINDS.SPRITE then
+            if not entry then
+                entry = { kind = kind }
+                self._entries[id] = entry
+            end
+            entry.worldPos = wPos
+            entry.worldAng = wAng
+            entry.worldScale = wScale
+            entry.visible = vis
+            local spr = node.sprite or { width = 32, height = 32 }
+            local hw = (spr.width or 32) * 0.5
+            local hh = (spr.height or 32) * 0.5
+            entry.boundsMin = Vector(-2, -hw, -hh)
+            entry.boundsMax = Vector(2, hw, hh)
+            local matPath = node.appearance.material or "sprites/light_glow02_add"
+            if entry.matPath ~= matPath then
+                entry.matPath = matPath
+                entry.material = self:_loadMaterialCached(matPath)
+            end
+        elseif kind == Constants.NODE_KINDS.GROUP or kind == Constants.NODE_KINDS.FOLDER or kind == Constants.NODE_KINDS.CAMERA then
+            if not entry then
+                entry = { kind = kind }
+                self._entries[id] = entry
+            end
+            entry.worldPos = wPos
+            entry.worldAng = wAng
+            entry.worldScale = wScale
+            entry.visible = vis
+            entry.boundsMin = DEFAULT_MINS
+            entry.boundsMax = DEFAULT_MAXS
+        end
+    end
+
+    -- Must ONLY be called outside render hooks (e.g. inside Think)
+    function SceneRuntime:flush()
+        if #self._pendingRemove > 0 then
+            for i = 1, #self._pendingRemove do
+                self:_destroyEntry(self._pendingRemove[i])
+            end
+            self._pendingRemove = {}
+        end
+
+        if next(self._dirtyNodes) ~= nil then
+            local batch = {}
+            for id in pairs(self._dirtyNodes) do
+                batch[#batch + 1] = id
+            end
+            self._dirtyNodes = {}
+
+            for _, id in ipairs(batch) do
+                local node = self._scene:getNode(id)
+                if node then
+                    self:_syncNode(node)
+                else
+                    self:_destroyEntry(id)
+                end
+            end
+        end
+    end
+
+    -- Returns world transform + scaled bounds for raycasting, outlines & camera focus
+    function SceneRuntime:getNodeBounds(nodeId)
+        local node = self._scene:getNode(nodeId)
+        if not node then return nil end
+
+        local entry = self._entries[nodeId]
+        local pos, ang, scale
+        if entry and entry.worldPos then
+            pos, ang, scale = entry.worldPos, entry.worldAng, entry.worldScale
+        else
+            pos, ang, scale = SOLACE.Math3D.computeWorldTransform(self._scene, nodeId)
+        end
+
+        local rawMin = (entry and entry.boundsMin) or DEFAULT_MINS
+        local rawMax = (entry and entry.boundsMax) or DEFAULT_MAXS
+        local sMin, sMax = SOLACE.Math3D.getScaledBounds(rawMin, rawMax, scale)
+        return pos, ang, sMin, sMax, scale, entry
+    end
+
+    -- Draw translucent 3D sprites in PostDrawTranslucentRenderables
+    function SceneRuntime:drawSprites(state)
+        if not state.studioOpen then return end
+        for id, entry in pairs(self._entries) do
+            if entry.kind == Constants.NODE_KINDS.SPRITE and entry.visible then
+                local node = self._scene:getNode(id)
+                if node and entry.worldPos then
+                    local spr = node.sprite or { width = 32, height = 32 }
+                    local w = (spr.width or 32) * (entry.worldScale and entry.worldScale[1] or 1)
+                    local h = (spr.height or 32) * (entry.worldScale and entry.worldScale[2] or 1)
+                    local col = IR.toColor(node.appearance.color)
+
+                    if entry.material then
+                        render.setMaterial(entry.material)
+                        render.draw3DSprite(entry.worldPos, w, h, col)
+                    else
+                        render.setMaterial(nil)
+                        render.setColor(col)
+                        render.draw3DSprite(entry.worldPos, w * 0.45, h * 0.45, col)
+                    end
+                end
+            end
+        end
+        render.setMaterial(nil)
+    end
+
+    function SceneRuntime:cleanup()
+        for id in pairs(self._entries) do
+            self:_destroyEntry(id)
+        end
+        self._entries = {}
+        self._dirtyNodes = {}
+        self._pendingRemove = {}
+    end
+
+
+    SOLACE.SceneRuntime = SceneRuntime
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 9: Math and transformations
+-- ============================================================================
+(function(SOLACE)
+
+    local Math3D = {}
+
+    -- Compose local matrix: T(pos) * R(ang) * T(pivot) * S(scale) * T(-pivot)
+    function Math3D.composeLocalMatrix(t)
+        local m = Matrix()
+        local pos = t.pos
+        local ang = t.ang
+        local scale = t.scale
+        local pivot = t.pivot
+
+        m:translate(Vector(pos[1] or 0, pos[2] or 0, pos[3] or 0))
+        m:rotate(Angle(ang[1] or 0, ang[2] or 0, ang[3] or 0))
+
+        local px, py, pz = pivot[1] or 0, pivot[2] or 0, pivot[3] or 0
+        local hasPivot = (px ~= 0 or py ~= 0 or pz ~= 0)
+        if hasPivot then
+            m:translate(Vector(px, py, pz))
+        end
+
+        local sx, sy, sz = scale[1] or 1, scale[2] or 1, scale[3] or 1
+        if sx ~= 1 or sy ~= 1 or sz ~= 1 then
+            m:scale(Vector(sx, sy, sz))
+        end
+
+        if hasPivot then
+            m:translate(Vector(-px, -py, -pz))
+        end
+
+        return m
+    end
+
+    -- Walk parent chain to compute world transform of a Scene IR node.
+    -- Returns: worldPos (Vector), worldAng (Angle), worldScale (Vector)
+    function Math3D.computeWorldTransform(sceneGraph, nodeId)
+        local chain = {}
+        local cur = sceneGraph:getNode(nodeId)
+        local rootId = sceneGraph:getRootId()
+        local guard = 0
+
+        while cur and cur.id ~= rootId and guard < 64 do
+            chain[#chain + 1] = cur
+            cur = cur.parentId and sceneGraph:getNode(cur.parentId) or nil
+            guard = guard + 1
+        end
+
+        if #chain == 0 then
+            return Vector(0, 0, 0), Angle(0, 0, 0), Vector(1, 1, 1)
+        end
+
+        local worldMat = Matrix()
+        local sx, sy, sz = 1, 1, 1
+        for i = #chain, 1, -1 do
+            local n = chain[i]
+            local t = n.transform
+            -- Compose translation/rotation hierarchy without baking scale into rotation matrix
+            local step = Matrix()
+            step:translate(Vector(t.pos[1] or 0, t.pos[2] or 0, t.pos[3] or 0))
+            step:rotate(Angle(t.ang[1] or 0, t.ang[2] or 0, t.ang[3] or 0))
+            worldMat = worldMat * step
+
+            local ns = t.scale
+            sx = sx * (ns[1] or 1)
+            sy = sy * (ns[2] or 1)
+            sz = sz * (ns[3] or 1)
+        end
+
+        return worldMat:getTranslation(), worldMat:getAngles(), Vector(sx, sy, sz)
+    end
+
+    -- Compute hierarchical visibility (false if any ancestor is hidden)
+    function Math3D.isNodeHierarchyVisible(sceneGraph, nodeId)
+        local cur = sceneGraph:getNode(nodeId)
+        local rootId = sceneGraph:getRootId()
+        local guard = 0
+        while cur and guard < 64 do
+            if cur.visible == false then return false end
+            if cur.id == rootId then break end
+            cur = cur.parentId and sceneGraph:getNode(cur.parentId) or nil
+            guard = guard + 1
+        end
+        return true
+    end
+
+    -- Scale local OBB mins/maxs safely (preserving min <= max even for negative scales)
+    function Math3D.getScaledBounds(mins, maxs, scale)
+        local sx, sy, sz = scale[1] or 1, scale[2] or 1, scale[3] or 1
+        local x1, x2 = (mins[1] or -8) * sx, (maxs[1] or 8) * sx
+        local y1, y2 = (mins[2] or -8) * sy, (maxs[2] or 8) * sy
+        local z1, z2 = (mins[3] or -8) * sz, (maxs[3] or 8) * sz
+
+        return Vector(math.min(x1, x2), math.min(y1, y2), math.min(z1, z2)),
+               Vector(math.max(x1, x2), math.max(y1, y2), math.max(z1, z2))
+    end
+
+    -- World center & approximate bounding radius of an OBB
+    function Math3D.getOBBCenterAndRadius(pos, ang, sMin, sMax)
+        local localCenter = (sMin + sMax) * 0.5
+        local halfExt = (sMax - sMin) * 0.5
+        local radius = math.max(8, halfExt:getLength())
+
+        local m = Matrix()
+        m:translate(pos)
+        m:rotate(ang)
+        m:translate(localCenter)
+        return m:getTranslation(), radius
+    end
+
+
+    SOLACE.Math3D = Math3D
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 10: Freecam
+-- ============================================================================
+(function(SOLACE)
+    local Constants = SOLACE.Constants
+    local Math3D = SOLACE.Math3D
+
+
+
+    local Freecam = {}
+    Freecam.__index = Freecam
+
+    function Freecam.new(state)
+        return setmetatable({
+            state = state,
+            initialized = false,
+            camPos = Vector(0, 0, 100),
+            camAng = Angle(15, 0, 0),
+            targetPos = Vector(0, 0, 100),
+            targetAng = Angle(15, 0, 0),
+        }, Freecam)
+    end
+
+    function Freecam:initFromPlayer()
+        local pos = eyePos()
+        local ang = eyeAngles()
+        -- Offset slightly up & back so user sees the studio origin/chip cleanly
+        local initPos = pos + Vector(0, 0, 16)
+        self.camPos = initPos:clone()
+        self.targetPos = initPos:clone()
+        self.camAng = Angle(ang[1], ang[2], 0)
+        self.targetAng = Angle(ang[1], ang[2], 0)
+        self.initialized = true
+    end
+
+    function Freecam:resetToPlayer()
+        self:initFromPlayer()
+    end
+
+    function Freecam:onMouseMoved(dx, dy)
+        if not self.state.studioOpen or not self.state.viewportLooking then return end
+        local sens = self.state.camera.sensitivity
+        self.targetAng[2] = math.normalizeAngle(self.targetAng[2] - dx * sens)
+        self.targetAng[1] = math.clamp(self.targetAng[1] + dy * sens, -89.0, 89.0)
+        self.targetAng[3] = 0
+    end
+
+    function Freecam:onMouseWheelInViewport(delta)
+        if not self.state.studioOpen then return end
+        local c = self.state.camera
+        local factor = delta > 0 and 1.15 or (1 / 1.15)
+        c.speed = math.clamp(math.round(c.speed * factor), Constants.CAMERA_DEFAULTS.minSpeed, Constants.CAMERA_DEFAULTS.maxSpeed)
+    end
+
+    function Freecam:focusNode(sceneGraph, runtime, nodeId)
+        if not self.initialized then self:initFromPlayer() end
+        local targetId = nodeId or sceneGraph:getSelectedId()
+        if not targetId or targetId == sceneGraph:getRootId() then return false end
+
+        local node = sceneGraph:getNode(targetId)
+        if not node then return false end
+
+        local pos, ang, sMin, sMax = runtime:getNodeBounds(targetId)
+        if not pos then return false end
+
+        local center, radius = Math3D.getOBBCenterAndRadius(pos, ang, sMin, sMax)
+        local halfFovRad = math.rad(math.clamp(self.state.camera.fov, 30, 120) * 0.5)
+        local dist = math.max(55, (radius / math.max(0.15, math.tan(halfFovRad))) * Constants.CAMERA_DEFAULTS.focusPadding)
+
+        local fwd = self.targetAng:getForward()
+        self.targetPos = center - fwd * dist
+        return true
+    end
+
+    function Freecam:getSpawnTransform(distance)
+        if not self.initialized then self:initFromPlayer() end
+        local d = distance or self.state.spawnDistance or 140
+        local p = self.camPos + self.camAng:getForward() * d
+        return { math.round(p[1], 2), math.round(p[2], 2), math.round(p[3], 2) },
+               { 0, math.round(self.camAng[2], 1), 0 }
+    end
+
+    function Freecam:update(dt, ui, vpRect)
+        if not self.initialized then
+            self:initFromPlayer()
+        end
+
+        if not self.state.studioOpen then return end
+        if not hasPermission("input") then return end
+
+        -- Adjust speed with mouse wheel when cursor is inside the viewport (or while RMB-looking)
+        if ui.wheelDelta ~= 0 and (self.state.viewportLooking or ui:pointInRect(vpRect.x, vpRect.y, vpRect.w, vpRect.h)) then
+            self:onMouseWheelInViewport(ui.wheelDelta)
+        end
+
+        -- Keyboard movement (disabled while typing into any TextBox)
+        if not ui.focusedInputId then
+            local fwd = 0
+            local right = 0
+            local up = 0
+
+            if input.isKeyDown(KEY.W) then fwd = fwd + 1 end
+            if input.isKeyDown(KEY.S) then fwd = fwd - 1 end
+            if input.isKeyDown(KEY.D) then right = right + 1 end
+            if input.isKeyDown(KEY.A) then right = right - 1 end
+            if input.isKeyDown(KEY.SPACE) then up = up + 1 end
+            if input.isKeyDown(KEY.LCONTROL) or input.isKeyDown(KEY.RCONTROL) then up = up - 1 end
+
+            if fwd ~= 0 or right ~= 0 or up ~= 0 then
+                local moveDir = self.targetAng:getForward() * fwd
+                    + self.targetAng:getRight() * right
+                    + Vector(0, 0, up)
+
+                local len = moveDir:getLength()
+                if len > 0.001 then
+                    moveDir = moveDir / len
+                    local spd = self.state.camera.speed
+                    if input.isShiftDown() then
+                        spd = spd * self.state.camera.boostMult
+                    end
+                    self.targetPos = self.targetPos + moveDir * (spd * dt)
+                end
+            end
+        end
+
+        -- Smooth exponential interpolation (frame-rate independent)
+        local smooth = self.state.camera.smoothing
+        if smooth >= 40 then
+            self.camPos = self.targetPos:clone()
+            self.camAng = self.targetAng:clone()
+        else
+            local t = 1 - math.exp(-smooth * dt)
+            self.camPos = math.lerpVector(t, self.camPos, self.targetPos)
+            self.camAng = math.lerpAngle(t, self.camAng, self.targetAng)
+            self.camAng[3] = 0
+        end
+    end
+
+    function Freecam:calcView(origin, angles, fov, znear, zfar)
+        if not self.state.studioOpen then return nil end
+        if not self.initialized then
+            self:initFromPlayer()
+        end
+        return {
+            origin = self.camPos,
+            angles = self.camAng,
+            fov = self.state.camera.fov,
+            drawviewer = true,
+        }
+    end
+
+
+    SOLACE.Freecam = Freecam
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 11: Object selection
+-- ============================================================================
+(function(SOLACE)
+    local Constants = SOLACE.Constants
+
+
+
+    local Selection = {
+        hoveredId = nil,
+    }
+
+    local RAY_LEN = 16384
+
+    -- Reusable corner scratch vectors
+    local p0 = Vector(0, 0, 0)
+    local p1 = Vector(0, 0, 0)
+    local p2 = Vector(0, 0, 0)
+    local p3 = Vector(0, 0, 0)
+
+    local function drawCornerBrackets(pos, ang, sMin, sMax, col, alpha)
+        local m = Matrix()
+        m:translate(pos)
+        m:rotate(ang)
+
+        local x1, y1, z1 = sMin[1], sMin[2], sMin[3]
+        local x2, y2, z2 = sMax[1], sMax[2], sMax[3]
+
+        -- Expand slightly (0.5u) to prevent Z-fighting on flat box surfaces
+        local pad = 0.5
+        x1, y1, z1 = x1 - pad, y1 - pad, z1 - pad
+        x2, y2, z2 = x2 + pad, y2 + pad, z2 + pad
+
+        local dx = (x2 - x1) * 0.22
+        local dy = (y2 - y1) * 0.22
+        local dz = (z2 - z1) * 0.22
+
+        SOLACE.Theme.setColor(col, alpha)
+
+        local xs = { x1, x2 }
+        local ys = { y1, y2 }
+        local zs = { z1, z2 }
+
+        for ix = 1, 2 do
+            local cx = xs[ix]
+            local sx = (ix == 1) and dx or -dx
+            for iy = 1, 2 do
+                local cy = ys[iy]
+                local sy = (iy == 1) and dy or -dy
+                for iz = 1, 2 do
+                    local cz = zs[iz]
+                    local sz = (iz == 1) and dz or -dz
+
+                    p0[1], p0[2], p0[3] = cx, cy, cz
+                    p1[1], p1[2], p1[3] = cx + sx, cy, cz
+                    p2[1], p2[2], p2[3] = cx, cy + sy, cz
+                    p3[1], p3[2], p3[3] = cx, cy, cz + sz
+
+                    local w0 = m * p0
+                    render.draw3DLine(w0, m * p1, true)
+                    render.draw3DLine(w0, m * p2, true)
+                    render.draw3DLine(w0, m * p3, true)
+                end
+            end
+        end
+    end
+
+    function Selection.pickAtCursor(ui, state, camera, sceneGraph, runtime, vpRect)
+        if not state.studioOpen or state.viewportLooking then
+            Selection.hoveredId = nil
+            return nil
+        end
+        if not ui:pointInRect(vpRect.x, vpRect.y, vpRect.w, vpRect.h) then
+            Selection.hoveredId = nil
+            return nil
+        end
+
+        local aimDir = trace.aimVector(camera.camAng, state.camera.fov, ui.mx, ui.my, ui.scrW, ui.scrH)
+        local rayDelta = aimDir * RAY_LEN
+
+        local bestId = nil
+        local bestFrac = 2.0
+
+        for id, entry in pairs(runtime:getEntries()) do
+            local node = sceneGraph:getNode(id)
+            if node and entry.visible and not node.locked then
+                local kind = node.kind
+                if kind == Constants.NODE_KINDS.MODEL
+                    or kind == Constants.NODE_KINDS.HOLOGRAM
+                    or kind == Constants.NODE_KINDS.SPRITE
+                then
+                    local pos, ang, sMin, sMax = runtime:getNodeBounds(id)
+                    if pos then
+                        local testAng = (kind == Constants.NODE_KINDS.SPRITE) and camera.camAng or ang
+                        local _, _, frac = trace.intersectRayWithOBB(camera.camPos, rayDelta, pos, testAng, sMin, sMax)
+                        if frac and frac < bestFrac then
+                            bestFrac = frac
+                            bestId = id
+                        end
+                    end
+                end
+            end
+        end
+
+        Selection.hoveredId = bestId
+        return bestId
+    end
+
+    function Selection.handleClick(ui, state, camera, sceneGraph, runtime, vpRect)
+        if not state.studioOpen or state.viewportLooking then return end
+        if ui.activeId ~= nil then return end
+        if not ui.leftPressed then return end
+        if not ui:pointInRect(vpRect.x, vpRect.y, vpRect.w, vpRect.h) then return end
+
+        -- If a HUD widget inside the viewport (none in P2, future gizmos in P3) didn't capture the click:
+        local hitId = Selection.pickAtCursor(ui, state, camera, sceneGraph, runtime, vpRect)
+        local ctrl = hasPermission("input") and input.isControlDown() or false
+
+        if hitId then
+            if ctrl then
+                sceneGraph:toggleSelectedId(hitId)
+            else
+                sceneGraph:setSelectedId(hitId)
+            end
+        else
+            if not ctrl then
+                sceneGraph:clearSelection()
+            end
+        end
+    end
+
+    function Selection.draw3D(state, camera, sceneGraph, runtime)
+        if not state.studioOpen then return end
+
+        local primaryId = sceneGraph:getSelectedId()
+        local selectedIds = sceneGraph:getSelectedIds()
+
+        -- Draw subtle hover box if cursor is over an unselected object
+        local hovId = Selection.hoveredId
+        if hovId and not sceneGraph:isSelected(hovId) then
+            local node = sceneGraph:getNode(hovId)
+            if node then
+                local pos, ang, sMin, sMax = runtime:getNodeBounds(hovId)
+                if pos then
+                    local testAng = (node.kind == Constants.NODE_KINDS.SPRITE) and camera.camAng or ang
+                    SOLACE.Theme.setColor(SOLACE.Theme.C.textPrimary, 95)
+                    render.draw3DWireframeBox(pos, testAng, sMin, sMax, true)
+                end
+            end
+        end
+
+        -- Draw selected object highlights
+        for _, id in ipairs(selectedIds) do
+            local node = sceneGraph:getNode(id)
+            if node and id ~= sceneGraph:getRootId() then
+                local pos, ang, sMin, sMax = runtime:getNodeBounds(id)
+                if pos then
+                    local isPrimary = (id == primaryId)
+                    local col = isPrimary and SOLACE.Theme.C.accentBright or SOLACE.Theme.C.accent
+                    local testAng = (node.kind == Constants.NODE_KINDS.SPRITE) and camera.camAng or ang
+
+                    -- Subtle wireframe cage + crisp corner brackets
+                    SOLACE.Theme.setColor(col, isPrimary and 120 or 80)
+                    render.draw3DWireframeBox(pos, testAng, sMin, sMax, true)
+                    drawCornerBrackets(pos, testAng, sMin, sMax, col, isPrimary and 255 or 190)
+                end
+            end
+        end
+    end
+
+
+    SOLACE.Selection = Selection
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 12: Transform gizmos (Phase 3)
+-- ============================================================================
+(function(SOLACE)
+    -- Reserved for Phase 3: Interactive 3D Move, Rotate, Scale & Pivot Gizmos.
+    local Gizmos = {
+        ready = false,
+        phase = 3,
+    }
+
+    SOLACE.Gizmos = Gizmos
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 13: UI framework
+-- ============================================================================
+(function(SOLACE)
+    local Constants = SOLACE.Constants
+
+    -- 13.1 Theme & Typography
+
+    local Theme = {}
+
+    -- Colors stored as {r, g, b, a} arrays so render.setRGBA can be called with zero allocations
+    Theme.C = {
+        -- Surfaces (layered dark slate hierarchy)
+        bgApp          = { 17, 19, 24, 248 },
+        bgPanel        = { 22, 25, 31, 245 },
+        bgPanelAlt     = { 27, 30, 38, 255 },
+        bgHeader       = { 29, 33, 42, 255 },
+        bgToolbar      = { 20, 23, 29, 250 },
+        bgInput        = { 15, 17, 22, 255 },
+        bgControl      = { 36, 40, 50, 255 },
+        bgControlHover = { 46, 52, 65, 255 },
+        bgControlPress = { 30, 34, 43, 255 },
+        bgSelection    = { 43, 92, 176, 110 },
+        bgSelectionRow = { 38, 79, 148, 95 },
+        bgBadgePhase   = { 42, 46, 58, 220 },
+
+        -- Borders & dividers
+        border         = { 44, 49, 60, 255 },
+        borderLight    = { 62, 69, 84, 255 },
+        borderFocus    = { 66, 135, 245, 255 },
+        splitter       = { 32, 36, 45, 255 },
+        splitterHover  = { 66, 135, 245, 220 },
+
+        -- Text hierarchy
+        textPrimary    = { 232, 236, 244, 255 },
+        textSecondary  = { 164, 172, 188, 255 },
+        textMuted      = { 108, 116, 132, 255 },
+        textDisabled   = { 80, 86, 100, 255 },
+
+        -- Brand & semantic accents
+        accent         = { 59, 130, 246, 255 },
+        accentSoft     = { 59, 130, 246, 42 },
+        accentBright   = { 96, 165, 250, 255 },
+        success        = { 34, 197, 94, 255 },
+        warning        = { 245, 158, 11, 255 },
+        danger         = { 239, 68, 68, 255 },
+
+        -- 3D Coordinate axes
+        axisX          = { 239, 68, 68, 255 },
+        axisY          = { 34, 197, 94, 255 },
+        axisZ          = { 59, 130, 246, 255 },
+
+        -- Viewport grid & overlays
+        gridMinor      = { 110, 122, 145, 55 },
+        gridMajor      = { 150, 165, 195, 115 },
+        hudPill        = { 16, 18, 24, 215 },
+        tooltipBg      = { 14, 16, 21, 245 },
+    }
+
+    Theme.Metrics = {
+        pad = 8,
+        padSm = 4,
+        padLg = 12,
+        headerH = 26,
+        rowH = 22,
+        controlH = 22,
+        radius = 3,
+    }
+
+    Theme.Fonts = {}
+
+    function Theme.initFonts()
+        if Theme._fontsReady then return end
+        Theme._fontsReady = true
+
+        -- Budget: 6 fonts total (StarfallEx sf_render_maxfonts default is 30)
+        Theme.Fonts.Title    = render.createFont("Tahoma", 15, 700, true)
+        Theme.Fonts.Header   = render.createFont("Tahoma", 13, 600, true)
+        Theme.Fonts.Body     = render.createFont("Tahoma", 13, 400, true)
+        Theme.Fonts.BodyBold = render.createFont("Tahoma", 13, 600, true)
+        Theme.Fonts.Small    = render.createFont("Tahoma", 11, 500, true)
+        Theme.Fonts.Mono     = render.createFont("DejaVu Sans Mono", 12, 400, true)
+    end
+
+    function Theme.setColor(c, alphaOverride)
+        render.setRGBA(c[1], c[2], c[3], alphaOverride or c[4] or 255)
+    end
+
+    -- Crisp procedural vector icons drawn with StarfallEx render primitives
+    function Theme.drawIcon(name, x, y, size, c, alphaOverride)
+        Theme.setColor(c or Theme.C.textSecondary, alphaOverride)
+        local cx = x + size * 0.5
+        local cy = y + size * 0.5
+        local r = size * 0.36
+
+        if name == "cursor" then
+            -- Clean pointer arrow
+            render.drawLine(x + 3, y + 2, x + 3, y + size - 3)
+            render.drawLine(x + 3, y + 2, x + size - 3, cy + 1)
+            render.drawLine(x + size - 3, cy + 1, cx + 1, cy + 2)
+            render.drawLine(cx + 1, cy + 2, x + 3, y + size - 3)
+        elseif name == "move" then
+            -- 4-way arrows
+            render.drawLine(cx, y + 2, cx, y + size - 2)
+            render.drawLine(x + 2, cy, x + size - 2, cy)
+            render.drawLine(cx - 2, y + 4, cx, y + 2)
+            render.drawLine(cx + 2, y + 4, cx, y + 2)
+            render.drawLine(cx - 2, y + size - 4, cx, y + size - 2)
+            render.drawLine(cx + 2, y + size - 4, cx, y + size - 2)
+            render.drawLine(x + 4, cy - 2, x + 2, cy)
+            render.drawLine(x + 4, cy + 2, x + 2, cy)
+            render.drawLine(x + size - 4, cy - 2, x + size - 2, cy)
+            render.drawLine(x + size - 4, cy + 2, x + size - 2, cy)
+        elseif name == "rotate" then
+            render.drawCircle(cx, cy, r)
+            render.drawLine(cx + r - 2, cy - 2, cx + r + 1, cy + 1)
+        elseif name == "scale" then
+            render.drawRectOutline(x + 2, y + 2, size - 4, size - 4, 1)
+            render.drawRectFast(x + size - 6, y + 2, 4, 4)
+            render.drawLine(cx - 2, cy + 2, x + size - 5, y + 5)
+        elseif name == "pivot" then
+            render.drawCircle(cx, cy, r * 0.7)
+            render.drawLine(cx, y + 2, cx, y + size - 2)
+            render.drawLine(x + 2, cy, x + size - 2, cy)
+        elseif name == "grid" then
+            local x0, y0 = x + 2, y + 2
+            local s = size - 4
+            render.drawRectOutline(x0, y0, s, s, 1)
+            render.drawLine(x0 + s * 0.5, y0, x0 + s * 0.5, y0 + s)
+            render.drawLine(x0, y0 + s * 0.5, x0 + s, y0 + s * 0.5)
+        elseif name == "axes" then
+            render.drawLine(x + 3, y + size - 3, x + 3, y + 3)
+            render.drawLine(x + 3, y + size - 3, x + size - 3, y + size - 3)
+            render.drawLine(x + 3, y + size - 3, cx + 3, cy - 3)
+        elseif name == "cube" or name == "holo" then
+            render.drawRectOutline(x + 3, y + 4, size - 7, size - 7, 1)
+            render.drawLine(x + 3, y + 4, x + 6, y + 2)
+            render.drawLine(x + size - 4, y + 4, x + size - 1, y + 2)
+            render.drawLine(x + 6, y + 2, x + size - 1, y + 2)
+            render.drawLine(x + size - 1, y + 2, x + size - 1, y + size - 5)
+            render.drawLine(x + size - 4, y + size - 3, x + size - 1, y + size - 5)
+        elseif name == "camera" then
+            render.drawRectOutline(x + 2, y + 4, size - 7, size - 8, 1)
+            render.drawLine(x + size - 5, cy - 2, x + size - 2, cy - 4)
+            render.drawLine(x + size - 5, cy + 2, x + size - 2, cy + 4)
+            render.drawLine(x + size - 2, cy - 4, x + size - 2, cy + 4)
+        elseif name == "play" then
+            render.drawLine(x + 4, y + 3, x + size - 3, cy)
+            render.drawLine(x + size - 3, cy, x + 4, y + size - 3)
+            render.drawLine(x + 4, y + 3, x + 4, y + size - 3)
+        elseif name == "pause" then
+            render.drawRectFast(x + 4, y + 3, 2, size - 6)
+            render.drawRectFast(x + size - 6, y + 3, 2, size - 6)
+        elseif name == "stop" then
+            render.drawRectFast(x + 4, y + 4, size - 8, size - 8)
+        elseif name == "undo" then
+            render.drawLine(x + 3, cy, x + size - 3, cy)
+            render.drawLine(x + 3, cy, x + 7, cy - 3)
+            render.drawLine(x + 3, cy, x + 7, cy + 3)
+        elseif name == "redo" then
+            render.drawLine(x + 3, cy, x + size - 3, cy)
+            render.drawLine(x + size - 3, cy, x + size - 7, cy - 3)
+            render.drawLine(x + size - 3, cy, x + size - 7, cy + 3)
+        elseif name == "save" then
+            render.drawRectOutline(x + 3, y + 3, size - 6, size - 6, 1)
+            render.drawRectFast(x + 5, y + 3, size - 10, 4)
+            render.drawRectFast(x + 5, y + size - 7, size - 10, 4)
+        elseif name == "export" then
+            render.drawRectOutline(x + 3, y + 6, size - 6, size - 9, 1)
+            render.drawLine(cx, y + 2, cx, cy + 1)
+            render.drawLine(cx - 3, y + 5, cx, y + 2)
+            render.drawLine(cx + 3, y + 5, cx, y + 2)
+        elseif name == "search" then
+            render.drawCircle(cx - 1, cy - 1, r * 0.72)
+            render.drawLine(cx + 2, cy + 2, x + size - 3, y + size - 3)
+        elseif name == "layers" or name == "scene" then
+            render.drawRectOutline(x + 3, y + 3, size - 6, 4, 1)
+            render.drawLine(x + 3, cy + 1, x + size - 3, cy + 1)
+            render.drawLine(x + 3, y + size - 4, x + size - 3, y + size - 4)
+        elseif name == "sparkle" or name == "burst" then
+            render.drawLine(cx, y + 2, cx, y + size - 2)
+            render.drawLine(x + 2, cy, x + size - 2, cy)
+            render.drawLine(x + 4, y + 4, x + size - 4, y + size - 4)
+            render.drawLine(x + size - 4, y + 4, x + 4, y + size - 4)
+        elseif name == "stamp" then
+            render.drawCircle(cx, cy, r)
+            render.drawFilledCircle(cx, cy, 2)
+        elseif name == "eye" then
+            render.drawCircle(cx, cy, r * 0.75)
+            render.drawFilledCircle(cx, cy, 2)
+        elseif name == "reset" then
+            render.drawRectOutline(x + 3, y + 3, size - 6, size - 6, 1)
+            render.drawLine(x + 3, cy, x + size - 3, cy)
+            render.drawLine(cx, y + 3, cx, y + size - 3)
+        elseif name == "hide" then
+            render.drawLine(x + 3, y + 3, x + size - 3, y + size - 3)
+            render.drawLine(x + size - 3, y + 3, x + 3, y + size - 3)
+        elseif name == "chevronDown" then
+            render.drawLine(cx - 3, cy - 1, cx, cy + 2)
+            render.drawLine(cx + 3, cy - 1, cx, cy + 2)
+        elseif name == "chevronRight" then
+            render.drawLine(cx - 1, cy - 3, cx + 2, cy)
+            render.drawLine(cx - 1, cy + 3, cx + 2, cy)
+        else
+            render.drawRectOutline(x + 3, y + 3, size - 6, size - 6, 1)
+        end
+    end
+
+    SOLACE.Theme = Theme
+
+    -- 13.2 Retained-Mode UI Manager
+
+
+    local UIManager = {}
+    UIManager.__index = UIManager
+
+    -- Lookup table for printable key mapping (avoiding per-key allocations)
+    local KEY_CHAR_MAP = {}
+    local SHIFT_MAP = {
+        ["1"] = "!", ["2"] = "@", ["3"] = "#", ["4"] = "$", ["5"] = "%",
+        ["6"] = "^", ["7"] = "&", ["8"] = "*", ["9"] = "(", ["0"] = ")",
+        ["-"] = "_", ["="] = "+", ["["] = "{", ["]"] = "}", ["\\"] = "|",
+        [";"] = ":", ["'"] = "\"", [","] = "<", ["."] = ">", ["/"] = "?",
+        ["`"] = "~",
+    }
+
+    local function buildKeyMap()
+        local letters = {
+            "A","B","C","D","E","F","G","H","I","J","K","L","M",
+            "N","O","P","Q","R","S","T","U","V","W","X","Y","Z"
+        }
+        for _, ch in ipairs(letters) do
+            if KEY[ch] then KEY_CHAR_MAP[KEY[ch]] = string.lower(ch) end
+        end
+        for i = 0, 9 do
+            local s = tostring(i)
+            if KEY["KEY" .. s] then KEY_CHAR_MAP[KEY["KEY" .. s]] = s end
+            if KEY[s] then KEY_CHAR_MAP[KEY[s]] = s end
+            if KEY["PAD_" .. s] then KEY_CHAR_MAP[KEY["PAD_" .. s]] = s end
+        end
+        local extras = {
+            SPACE = " ",
+            MINUS = "-",
+            EQUAL = "=",
+            LBRACKET = "[",
+            RBRACKET = "]",
+            BACKSLASH = "\\",
+            SEMICOLON = ";",
+            APOSTROPHE = "'",
+            COMMA = ",",
+            PERIOD = ".",
+            SLASH = "/",
+            BACKQUOTE = "`",
+            PAD_MINUS = "-",
+            PAD_PLUS = "+",
+            PAD_MULTIPLY = "*",
+            PAD_DIVIDE = "/",
+            PAD_DECIMAL = ".",
+        }
+        for k, v in pairs(extras) do
+            if KEY[k] then KEY_CHAR_MAP[KEY[k]] = v end
+        end
+    end
+
+    local BLOCKED_STUDIO_BINDS = {
+        ["+forward"] = true,
+        ["+back"] = true,
+        ["+moveleft"] = true,
+        ["+moveright"] = true,
+        ["+jump"] = true,
+        ["+duck"] = true,
+        ["+speed"] = true,
+        ["+walk"] = true,
+        ["+attack"] = true,
+        ["+attack2"] = true,
+        ["+reload"] = true,
+        ["+use"] = true,
+        ["invnext"] = true,
+        ["invprev"] = true,
+        ["+menu"] = true,
+        ["+menu_context"] = true,
+    }
+
+    function UIManager.new(state)
+        buildKeyMap()
+        return setmetatable({
+            state = state,
+            scrW = 1920,
+            scrH = 1080,
+            mx = 0,
+            my = 0,
+            prevMx = 0,
+            prevMy = 0,
+            dx = 0,
+            dy = 0,
+            leftDown = false,
+            leftPressed = false,
+            leftReleased = false,
+            rightDown = false,
+            rightPressed = false,
+            rightReleased = false,
+            wheelDelta = 0,
+
+            activeId = nil,       -- ID currently captured by mouse drag
+            hotId = nil,          -- ID currently hovered
+            focusedInputId = nil, -- ID of active TextBox
+            _inputState = {},     -- Per-TextBox transient cursor/value callbacks
+            _tooltipText = nil,
+            _tooltipTimer = 0,
+            _lastHoverId = nil,
+            _clipStack = {},
+            _frameTime = 0,
+        }, UIManager)
+    end
+
+    function UIManager:beginFrame(dt)
+        self._frameTime = self._frameTime + dt
+        self.scrW, self.scrH = render.getResolution()
+
+        self.prevMx, self.prevMy = self.mx, self.my
+        if hasPermission("input") then
+            local cx, cy = input.getCursorPos()
+            self.mx = cx or self.mx
+            self.my = cy or self.my
+        end
+        self.dx = self.mx - self.prevMx
+        self.dy = self.my - self.prevMy
+
+        local lDown = hasPermission("input") and input.isMouseDown(MOUSE.LEFT) or false
+        local rDown = hasPermission("input") and input.isMouseDown(MOUSE.RIGHT) or false
+
+        self.leftPressed = lDown and not self.leftDown
+        self.leftReleased = (not lDown) and self.leftDown
+        self.leftDown = lDown
+
+        self.rightPressed = rDown and not self.rightDown
+        self.rightReleased = (not rDown) and self.rightDown
+        self.rightDown = rDown
+
+        if self.leftPressed then
+            -- Clear text focus unless the clicked TextBox re-claims it during draw/update
+            self._pendingClearFocus = true
+        end
+
+        self.hotId = nil
+        self._tooltipText = nil
+    end
+
+    function UIManager:endFrame(dt)
+        if self._pendingClearFocus then
+            self.focusedInputId = nil
+            self._pendingClearFocus = false
+        end
+
+        if self.leftReleased and self.activeId then
+            self.activeId = nil
+        end
+
+        if self.hotId and self.hotId == self._lastHoverId and not self.activeId then
+            self._tooltipTimer = self._tooltipTimer + dt
+        else
+            self._tooltipTimer = 0
+            self._lastHoverId = self.hotId
+        end
+
+        self.wheelDelta = 0
+    end
+
+    function UIManager:onMouseWheeled(delta)
+        self.wheelDelta = self.wheelDelta + delta
+    end
+
+    function UIManager:pointInRect(x, y, w, h)
+        return self.mx >= x and self.mx <= (x + w) and self.my >= y and self.my <= (y + h)
+    end
+
+    -- Respects active scissor clip stack so clipped scroll contents cannot be clicked outside parent
+    function UIManager:isMouseInClip()
+        local top = self._clipStack[#self._clipStack]
+        if not top then return true end
+        return self.mx >= top[1] and self.mx <= top[3] and self.my >= top[2] and self.my <= top[4]
+    end
+
+    function UIManager:hitTest(id, x, y, w, h)
+        if self.state.viewportLooking then return false, false end
+        local inside = self:pointInRect(x, y, w, h) and self:isMouseInClip()
+        local canHover = (self.activeId == nil or self.activeId == id)
+        if inside and canHover then
+            self.hotId = id
+        end
+        local isHot = (self.hotId == id)
+        local isActive = (self.activeId == id)
+        return isHot, isActive
+    end
+
+    function UIManager:capture(id)
+        self.activeId = id
+    end
+
+    function UIManager:release(id)
+        if self.activeId == id then
+            self.activeId = nil
+        end
+    end
+
+    function UIManager:setTooltip(text)
+        if text and text ~= "" then
+            self._tooltipText = text
+        end
+    end
+
+    function UIManager:pushClip(x, y, w, h)
+        local x1, y1, x2, y2 = x, y, x + math.max(0, w), y + math.max(0, h)
+        local top = self._clipStack[#self._clipStack]
+        if top then
+            x1 = math.max(x1, top[1])
+            y1 = math.max(y1, top[2])
+            x2 = math.min(x2, top[3])
+            y2 = math.min(y2, top[4])
+        end
+        self._clipStack[#self._clipStack + 1] = { x1, y1, x2, y2 }
+        render.enableScissorRect(x1, y1, math.max(x1, x2), math.max(y1, y2))
+    end
+
+    function UIManager:popClip()
+        local n = #self._clipStack
+        if n == 0 then return end
+        self._clipStack[n] = nil
+        local top = self._clipStack[n - 1]
+        if top then
+            render.enableScissorRect(top[1], top[2], math.max(top[1], top[3]), math.max(top[2], top[4]))
+        else
+            render.disableScissorRect()
+        end
+    end
+
+    function UIManager:registerTextInput(id, getter, setter, onSubmit)
+        self._inputState[id] = {
+            get = getter,
+            set = setter,
+            onSubmit = onSubmit,
+        }
+    end
+
+    function UIManager:focusTextInput(id)
+        self.focusedInputId = id
+        self._pendingClearFocus = false
+    end
+
+    function UIManager:handleKeyPressed(key)
+        if not self.focusedInputId then return false end
+        local entry = self._inputState[self.focusedInputId]
+        if not entry then
+            self.focusedInputId = nil
+            return false
+        end
+
+        if key == KEY.ESCAPE then
+            self.focusedInputId = nil
+            return true
+        elseif key == KEY.ENTER or key == KEY.PAD_ENTER then
+            if entry.onSubmit then entry.onSubmit(entry.get()) end
+            self.focusedInputId = nil
+            return true
+        elseif key == KEY.BACKSPACE then
+            local txt = entry.get() or ""
+            if #txt > 0 then
+                entry.set(string.sub(txt, 1, #txt - 1))
+            end
+            return true
+        end
+
+        local ch = KEY_CHAR_MAP[key]
+        if ch then
+            local shift = hasPermission("input") and input.isShiftDown() or false
+            if shift then
+                ch = SHIFT_MAP[ch] or string.upper(ch)
+            end
+            entry.set((entry.get() or "") .. ch)
+            return true
+        end
+
+        return false
+    end
+
+    function UIManager:shouldBlockBind(bind)
+        if not self.state.studioOpen then return false end
+        if self.focusedInputId then return true end
+        if self.state.viewportLooking then return false end
+        return BLOCKED_STUDIO_BINDS[bind] == true
+    end
+
+    function UIManager:drawTooltip()
+        if not self._tooltipText or self._tooltipTimer < 0.35 or self.activeId then return end
+
+        render.setFont(Theme.Fonts.Small)
+        local tw, th = render.getTextSize(self._tooltipText)
+        local padX, padY = 8, 5
+        local bw = tw + padX * 2
+        local bh = th + padY * 2
+
+        local tx = math.clamp(self.mx + 14, 6, self.scrW - bw - 6)
+        local ty = math.clamp(self.my + 18, 6, self.scrH - bh - 6)
+
+        Theme.setColor(Theme.C.tooltipBg)
+        render.drawRectFast(tx, ty, bw, bh)
+        Theme.setColor(Theme.C.borderLight)
+        render.drawRectOutline(tx, ty, bw, bh, 1)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(tx + padX, ty + padY, self._tooltipText, TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+    end
+
+    SOLACE.UIManager = UIManager
+
+    -- 13.3 Reusable Studio Widgets
+
+
+    local Widgets = {}
+
+    function Widgets.panelFrame(x, y, w, h, title, rightText)
+        Theme.setColor(Theme.C.bgPanel)
+        render.drawRectFast(x, y, w, h)
+
+        Theme.setColor(Theme.C.border)
+        render.drawRectOutline(x, y, w, h, 1)
+
+        local hh = Theme.Metrics.headerH
+        Theme.setColor(Theme.C.bgHeader)
+        render.drawRectFast(x + 1, y + 1, w - 2, hh - 1)
+
+        Theme.setColor(Theme.C.border)
+        render.drawLine(x + 1, y + hh, x + w - 1, y + hh)
+
+        render.setFont(Theme.Fonts.Header)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(x + 10, y + hh * 0.5, title, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        if rightText and rightText ~= "" then
+            render.setFont(Theme.Fonts.Small)
+            Theme.setColor(Theme.C.textMuted)
+            render.drawSimpleText(x + w - 10, y + hh * 0.5, rightText, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+        end
+
+        return x + 1, y + hh + 1, math.max(0, w - 2), math.max(0, h - hh - 2)
+    end
+
+    function Widgets.button(ui, id, x, y, w, h, label, opts)
+        opts = opts or {}
+        local disabled = opts.disabled == true
+        local active = opts.active == true
+        local hot, captured = ui:hitTest(id, x, y, w, h)
+
+        if hot and opts.tooltip then
+            ui:setTooltip(opts.tooltip)
+        end
+
+        local clicked = false
+        if not disabled and hot and ui.leftPressed then
+            ui:capture(id)
+        end
+        if not disabled and captured and ui.leftReleased and hot then
+            clicked = true
+        end
+
+        -- Background
+        if disabled then
+            Theme.setColor(Theme.C.bgPanelAlt, 180)
+        elseif active then
+            Theme.setColor(Theme.C.accentSoft)
+        elseif captured and hot then
+            Theme.setColor(Theme.C.bgControlPress)
+        elseif hot then
+            Theme.setColor(Theme.C.bgControlHover)
+        else
+            Theme.setColor(opts.subtle and Theme.C.bgPanel or Theme.C.bgControl)
+        end
+        render.drawRectFast(x, y, w, h)
+
+        -- Border
+        if active then
+            Theme.setColor(Theme.C.accent)
+        elseif hot and not disabled then
+            Theme.setColor(Theme.C.borderLight)
+        else
+            Theme.setColor(Theme.C.border, disabled and 120 or 255)
+        end
+        render.drawRectOutline(x, y, w, h, 1)
+
+        local textColor = disabled and Theme.C.textDisabled
+            or (active and Theme.C.accentBright or Theme.C.textPrimary)
+
+        local cursorX = x + 8
+        if opts.icon then
+            local iconSize = math.min(14, h - 6)
+            local ix = (label == nil or label == "") and (x + (w - iconSize) * 0.5) or cursorX
+            local iy = y + (h - iconSize) * 0.5
+            Theme.drawIcon(opts.icon, ix, iy, iconSize, textColor)
+            cursorX = cursorX + iconSize + 6
+        end
+
+        if label and label ~= "" then
+            render.setFont(opts.font or Theme.Fonts.Body)
+            Theme.setColor(textColor)
+            if opts.icon then
+                render.drawSimpleText(cursorX, y + h * 0.5, label, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+            else
+                render.drawSimpleText(x + w * 0.5, y + h * 0.5, label, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+            end
+        end
+
+        if opts.badge and opts.badge ~= "" then
+            render.setFont(Theme.Fonts.Small)
+            local bw = 20
+            local bh = 13
+            local bx = x + w - bw - 3
+            local by = y + 3
+            Theme.setColor(Theme.C.bgBadgePhase)
+            render.drawRectFast(bx, by, bw, bh)
+            Theme.setColor(Theme.C.textMuted)
+            render.drawSimpleText(bx + bw * 0.5, by + bh * 0.5, opts.badge, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+        end
+
+        return clicked
+    end
+
+    function Widgets.stepper(ui, id, x, y, w, h, label, valueText, tooltip)
+        local labelW = math.floor(w * 0.48)
+        local ctrlX = x + labelW
+        local ctrlW = w - labelW
+        local btnW = 20
+
+        render.setFont(Theme.Fonts.Body)
+        Theme.setColor(Theme.C.textSecondary)
+        render.drawSimpleText(x, y + h * 0.5, label, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        if tooltip and ui:pointInRect(x, y, labelW, h) and ui:isMouseInClip() then
+            ui:setTooltip(tooltip)
+        end
+
+        local prevClicked = Widgets.button(ui, id .. "_prev", ctrlX, y, btnW, h, "<", { tooltip = tooltip })
+        local nextClicked = Widgets.button(ui, id .. "_next", ctrlX + ctrlW - btnW, y, btnW, h, ">", { tooltip = tooltip })
+
+        local midX = ctrlX + btnW
+        local midW = math.max(0, ctrlW - btnW * 2)
+        Theme.setColor(Theme.C.bgInput)
+        render.drawRectFast(midX, y, midW, h)
+        Theme.setColor(Theme.C.border)
+        render.drawRectOutline(midX, y, midW, h, 1)
+
+        render.setFont(Theme.Fonts.Mono)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(midX + midW * 0.5, y + h * 0.5, tostring(valueText), TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+
+        return prevClicked, nextClicked
+    end
+
+    function Widgets.slider(ui, id, x, y, w, h, label, value, minVal, maxVal, step, fmt, tooltip)
+        local labelW = math.floor(w * 0.48)
+        local trackX = x + labelW
+        local trackW = math.max(40, w - labelW)
+
+        render.setFont(Theme.Fonts.Body)
+        Theme.setColor(Theme.C.textSecondary)
+        render.drawSimpleText(x, y + h * 0.5, label, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        local hot, captured = ui:hitTest(id, trackX, y, trackW, h)
+        if (hot or (ui:pointInRect(x, y, labelW, h) and ui:isMouseInClip())) and tooltip then
+            ui:setTooltip(tooltip)
+        end
+
+        local newVal = value
+        local changed = false
+        if hot and ui.leftPressed then
+            ui:capture(id)
+        end
+        if captured and ui.leftDown then
+            local frac = math.clamp((ui.mx - trackX) / trackW, 0, 1)
+            local raw = minVal + (maxVal - minVal) * frac
+            if step and step > 0 then
+                raw = math.round(raw / step) * step
+            end
+            raw = math.clamp(raw, minVal, maxVal)
+            if math.abs(raw - value) > 1e-6 then
+                newVal = raw
+                changed = true
+            end
+        end
+
+        -- Track background
+        Theme.setColor(Theme.C.bgInput)
+        render.drawRectFast(trackX, y, trackW, h)
+
+        local frac = math.clamp((newVal - minVal) / math.max(1e-6, maxVal - minVal), 0, 1)
+        local fillW = math.floor((trackW - 2) * frac)
+        Theme.setColor(captured and Theme.C.accent or (hot and Theme.C.bgSelection or Theme.C.accentSoft), captured and 140 or 180)
+        render.drawRectFast(trackX + 1, y + 1, fillW, h - 2)
+
+        Theme.setColor((hot or captured) and Theme.C.borderFocus or Theme.C.border)
+        render.drawRectOutline(trackX, y, trackW, h, 1)
+
+        render.setFont(Theme.Fonts.Mono)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(trackX + trackW * 0.5, y + h * 0.5, string.format(fmt or "%.0f", newVal), TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+
+        return newVal, changed
+    end
+
+    function Widgets.textBox(ui, id, x, y, w, h, getter, setter, placeholder, tooltip)
+        ui:registerTextInput(id, getter, setter)
+        local val = getter() or ""
+        local focused = (ui.focusedInputId == id)
+        local clearW = (#val > 0) and 20 or 0
+        local hot, _ = ui:hitTest(id, x, y, w - clearW, h)
+
+        if hot and tooltip then
+            ui:setTooltip(tooltip)
+        end
+        if hot and ui.leftPressed then
+            ui:focusTextInput(id)
+        end
+
+        Theme.setColor(Theme.C.bgInput)
+        render.drawRectFast(x, y, w, h)
+        Theme.setColor(focused and Theme.C.borderFocus or (hot and Theme.C.borderLight or Theme.C.border))
+        render.drawRectOutline(x, y, w, h, 1)
+
+        Theme.drawIcon("search", x + 6, y + (h - 12) * 0.5, 12, focused and Theme.C.accentBright or Theme.C.textMuted)
+
+        ui:pushClip(x + 22, y + 1, math.max(0, w - 26 - clearW), h - 2)
+        render.setFont(Theme.Fonts.Body)
+        if #val > 0 then
+            Theme.setColor(Theme.C.textPrimary)
+            render.drawSimpleText(x + 24, y + h * 0.5, val, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+            if focused and (math.floor(ui._frameTime * 2) % 2 == 0) then
+                local tw = render.getTextSize(val)
+                Theme.setColor(Theme.C.accentBright)
+                render.drawLine(x + 25 + tw, y + 4, x + 25 + tw, y + h - 4)
+            end
+        else
+            Theme.setColor(Theme.C.textMuted)
+            render.drawSimpleText(x + 24, y + h * 0.5, placeholder or "Search...", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+            if focused and (math.floor(ui._frameTime * 2) % 2 == 0) then
+                Theme.setColor(Theme.C.accentBright)
+                render.drawLine(x + 25, y + 4, x + 25, y + h - 4)
+            end
+        end
+        ui:popClip()
+
+        if clearW > 0 then
+            if Widgets.button(ui, id .. "_clr", x + w - clearW, y, clearW, h, "x", { subtle = true, tooltip = "Clear search" }) then
+                setter("")
+            end
+        end
+    end
+
+    function Widgets.sectionHeader(ui, id, x, y, w, h, title, isOpen)
+        local hot, captured = ui:hitTest(id, x, y, w, h)
+        local toggled = false
+        if hot and ui.leftPressed then ui:capture(id) end
+        if captured and ui.leftReleased and hot then toggled = true end
+
+        Theme.setColor(hot and Theme.C.bgControlHover or Theme.C.bgHeader)
+        render.drawRectFast(x, y, w, h)
+        Theme.setColor(Theme.C.border)
+        render.drawLine(x, y + h - 1, x + w, y + h - 1)
+
+        Theme.drawIcon(isOpen and "chevronDown" or "chevronRight", x + 6, y + (h - 12) * 0.5, 12, Theme.C.textSecondary)
+
+        render.setFont(Theme.Fonts.BodyBold)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(x + 22, y + h * 0.5, title, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        if toggled then
+            return not isOpen
+        end
+        return isOpen
+    end
+
+    function Widgets.keyValueRow(x, y, w, h, keyText, valText, valColor)
+        render.setFont(Theme.Fonts.Body)
+        Theme.setColor(Theme.C.textSecondary)
+        render.drawSimpleText(x, y + h * 0.5, keyText, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        render.setFont(Theme.Fonts.Mono)
+        Theme.setColor(valColor or Theme.C.textPrimary)
+        render.drawSimpleText(x + w, y + h * 0.5, tostring(valText), TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+    end
+
+    function Widgets.phaseNotice(x, y, w, title, bodyLines, phaseBadge)
+        local lineH = 15
+        local h = 34 + #bodyLines * lineH
+        Theme.setColor(Theme.C.bgPanelAlt)
+        render.drawRectFast(x, y, w, h)
+        Theme.setColor(Theme.C.border)
+        render.drawRectOutline(x, y, w, h, 1)
+
+        render.setFont(Theme.Fonts.BodyBold)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(x + 10, y + 13, title, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        if phaseBadge then
+            render.setFont(Theme.Fonts.Small)
+            Theme.setColor(Theme.C.accentBright)
+            render.drawSimpleText(x + w - 10, y + 13, phaseBadge, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+        end
+
+        render.setFont(Theme.Fonts.Small)
+        Theme.setColor(Theme.C.textMuted)
+        for i, line in ipairs(bodyLines) do
+            render.drawSimpleText(x + 10, y + 26 + (i - 1) * lineH, line, TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+        end
+        return h
+    end
+
+    SOLACE.Widgets = Widgets
+
+    -- 13.4 Resizable Dock Layout & Splitters
+
+
+    local Layout = {}
+    Layout.__index = Layout
+
+    function Layout.new(state)
+        local d = Constants.LAYOUT_DEFAULTS
+        return setmetatable({
+            state = state,
+            toolbarH = d.toolbarHeight,
+            leftW = d.leftWidth,
+            rightW = d.rightWidth,
+            bottomH = d.bottomHeight,
+            explorerRatio = d.explorerRatio,
+            rects = {
+                toolbar = { x = 0, y = 0, w = 0, h = 0 },
+                toolbox = { x = 0, y = 0, w = 0, h = 0 },
+                viewport = { x = 0, y = 0, w = 0, h = 0 },
+                explorer = { x = 0, y = 0, w = 0, h = 0 },
+                properties = { x = 0, y = 0, w = 0, h = 0 },
+                timeline = { x = 0, y = 0, w = 0, h = 0 },
+            },
+            _splitters = {},
+        }, Layout)
+    end
+
+    function Layout:reset()
+        local d = Constants.LAYOUT_DEFAULTS
+        self.leftW = d.leftWidth
+        self.rightW = d.rightWidth
+        self.bottomH = d.bottomHeight
+        self.explorerRatio = d.explorerRatio
+    end
+
+    function Layout:compute(scrW, scrH)
+        local d = Constants.LAYOUT_DEFAULTS
+        local sp = d.splitterSize
+        local panels = self.state.panels
+
+        local showLeft = panels.toolbox
+        local showRight = panels.explorer or panels.properties
+        local showBottom = panels.timeline
+
+        local topY = self.toolbarH
+        local availH = math.max(200, scrH - topY)
+
+        -- Clamp bottom timeline height
+        local activeBottomH = 0
+        if showBottom then
+            local maxB = math.min(d.maxBottomHeight, availH - d.minViewportHeight - sp)
+            self.bottomH = math.clamp(self.bottomH, d.minBottomHeight, math.max(d.minBottomHeight, maxB))
+            activeBottomH = self.bottomH
+        end
+
+        local middleH = availH - (showBottom and (activeBottomH + sp) or 0)
+
+        -- Clamp left & right widths while preserving minimum center viewport width
+        local activeLeftW = showLeft and math.clamp(self.leftW, d.minLeftWidth, d.maxLeftWidth) or 0
+        local activeRightW = showRight and math.clamp(self.rightW, d.minRightWidth, d.maxRightWidth) or 0
+
+        local neededNonViewport = (showLeft and (activeLeftW + sp) or 0) + (showRight and (activeRightW + sp) or 0)
+        if scrW - neededNonViewport < d.minViewportWidth then
+            local maxCombined = math.max(0, scrW - d.minViewportWidth - (showLeft and sp or 0) - (showRight and sp or 0))
+            if showLeft and showRight then
+                local ratio = activeLeftW / math.max(1, activeLeftW + activeRightW)
+                activeLeftW = math.floor(maxCombined * ratio)
+                activeRightW = maxCombined - activeLeftW
+            elseif showLeft then
+                activeLeftW = maxCombined
+            elseif showRight then
+                activeRightW = maxCombined
+            end
+        end
+
+        self.leftW = showLeft and activeLeftW or self.leftW
+        self.rightW = showRight and activeRightW or self.rightW
+
+        local r = self.rects
+        r.toolbar = { x = 0, y = 0, w = scrW, h = self.toolbarH }
+
+        local curX = 0
+        if showLeft then
+            r.toolbox = { x = 0, y = topY, w = activeLeftW, h = middleH }
+            curX = activeLeftW + sp
+        else
+            r.toolbox = { x = 0, y = 0, w = 0, h = 0 }
+        end
+
+        local vpW = scrW - curX - (showRight and (activeRightW + sp) or 0)
+        r.viewport = { x = curX, y = topY, w = math.max(0, vpW), h = middleH }
+
+        local rightX = curX + r.viewport.w + (showRight and sp or 0)
+        if panels.explorer and panels.properties then
+            local expH = math.floor((middleH - sp) * math.clamp(self.explorerRatio, d.minExplorerRatio, d.maxExplorerRatio))
+            local propY = topY + expH + sp
+            r.explorer = { x = rightX, y = topY, w = activeRightW, h = expH }
+            r.properties = { x = rightX, y = propY, w = activeRightW, h = math.max(0, middleH - expH - sp) }
+        elseif panels.explorer then
+            r.explorer = { x = rightX, y = topY, w = activeRightW, h = middleH }
+            r.properties = { x = 0, y = 0, w = 0, h = 0 }
+        elseif panels.properties then
+            r.explorer = { x = 0, y = 0, w = 0, h = 0 }
+            r.properties = { x = rightX, y = topY, w = activeRightW, h = middleH }
+        else
+            r.explorer = { x = 0, y = 0, w = 0, h = 0 }
+            r.properties = { x = 0, y = 0, w = 0, h = 0 }
+        end
+
+        if showBottom then
+            r.timeline = { x = 0, y = topY + middleH + sp, w = scrW, h = activeBottomH }
+        else
+            r.timeline = { x = 0, y = 0, w = 0, h = 0 }
+        end
+
+        -- Build active splitter hitboxes
+        self._splitters = {}
+        if showLeft then
+            self._splitters[#self._splitters + 1] = {
+                id = "split_left",
+                axis = "x",
+                x = r.toolbox.w,
+                y = topY,
+                w = sp,
+                h = middleH,
+            }
+        end
+        if showRight then
+            self._splitters[#self._splitters + 1] = {
+                id = "split_right",
+                axis = "x",
+                x = r.viewport.x + r.viewport.w,
+                y = topY,
+                w = sp,
+                h = middleH,
+            }
+        end
+        if panels.explorer and panels.properties then
+            self._splitters[#self._splitters + 1] = {
+                id = "split_right_y",
+                axis = "y",
+                x = rightX,
+                y = r.explorer.y + r.explorer.h,
+                w = activeRightW,
+                h = sp,
+                parentTop = topY,
+                parentH = middleH - sp,
+            }
+        end
+        if showBottom then
+            self._splitters[#self._splitters + 1] = {
+                id = "split_bottom",
+                axis = "y",
+                x = 0,
+                y = topY + middleH,
+                w = scrW,
+                h = sp,
+            }
+        end
+    end
+
+    function Layout:updateAndDrawSplitters(ui)
+        local d = Constants.LAYOUT_DEFAULTS
+        for _, s in ipairs(self._splitters) do
+            local hot, captured = ui:hitTest(s.id, s.x - 1, s.y - 1, s.w + 2, s.h + 2)
+            if hot then
+                ui:setTooltip("Drag to resize panel")
+            end
+            if hot and ui.leftPressed then
+                ui:capture(s.id)
+            end
+
+            if captured and ui.leftDown then
+                if s.id == "split_left" then
+                    self.leftW = math.clamp(ui.mx, d.minLeftWidth, d.maxLeftWidth)
+                elseif s.id == "split_right" then
+                    self.rightW = math.clamp(ui.scrW - ui.mx, d.minRightWidth, d.maxRightWidth)
+                elseif s.id == "split_bottom" then
+                    self.bottomH = math.clamp(ui.scrH - ui.my, d.minBottomHeight, d.maxBottomHeight)
+                elseif s.id == "split_right_y" then
+                    local frac = (ui.my - s.parentTop) / math.max(1, s.parentH)
+                    self.explorerRatio = math.clamp(frac, d.minExplorerRatio, d.maxExplorerRatio)
+                end
+            end
+
+            Theme.setColor((hot or captured) and Theme.C.splitterHover or Theme.C.splitter)
+            render.drawRectFast(s.x, s.y, s.w, s.h)
+
+            -- Subtle grip indicator
+            Theme.setColor((hot or captured) and Theme.C.textPrimary or Theme.C.borderLight)
+            if s.axis == "x" then
+                local cy = s.y + s.h * 0.5
+                render.drawRectFast(s.x + 1, cy - 12, s.w - 2, 24)
+            else
+                local cx = s.x + s.w * 0.5
+                render.drawRectFast(cx - 14, s.y + 1, 28, s.h - 2)
+            end
+        end
+    end
+
+    SOLACE.Layout = Layout
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 14: UI panels
+-- ============================================================================
+(function(SOLACE)
+    local Constants = SOLACE.Constants
+    local Utils = SOLACE.Utils
+    local Theme = SOLACE.Theme
+    local Widgets = SOLACE.Widgets
+
+    -- 14.1 3D Viewport Grid & Overlays
+
+
+    local ViewportGrid = {}
+
+    -- Reusable scratch vectors for zero-allocation 3D line drawing
+    local pA = Vector(0, 0, 0)
+    local pB = Vector(0, 0, 0)
+
+    local AXIS_VECS = {
+        { label = "X", vec = Vector(1, 0, 0), color = Theme.C.axisX },
+        { label = "Y", vec = Vector(0, 1, 0), color = Theme.C.axisY },
+        { label = "Z", vec = Vector(0, 0, 1), color = Theme.C.axisZ },
+    }
+
+    local function setVec(v, x, y, z)
+        v[1] = x
+        v[2] = y
+        v[3] = z
+    end
+
+    function ViewportGrid.resolveOrigin(state)
+        local g = state.grid
+        if g.originMode == "chip" and isValid(chip()) then
+            local p = chip():getPos()
+            g.originPos[1], g.originPos[2], g.originPos[3] = p[1], p[2], p[3]
+        elseif g.originMode == "player" and isValid(player()) then
+            local p = player():getPos()
+            g.originPos[1], g.originPos[2], g.originPos[3] = p[1], p[2], p[3]
+        else
+            g.originPos[1], g.originPos[2], g.originPos[3] = 0, 0, 0
+        end
+    end
+
+    function ViewportGrid.draw3D(state)
+        if not state.studioOpen then return end
+        local g = state.grid
+        if not g.enabled and not g.showAxes then return end
+
+        local ox = g.originPos[1]
+        local oy = g.originPos[2]
+        local oz = g.originPos[3] + (g.zOffset or 0.25)
+
+        local spacing = g.spacing
+        local n = g.halfExtents
+        local majorEvery = math.max(1, g.majorEvery)
+        local span = n * spacing
+
+        if g.enabled then
+            for i = -n, n do
+                local isOriginLine = (i == 0)
+                local isMajor = (i % majorEvery == 0)
+
+                if not (isOriginLine and g.showAxes) then
+                    local c = isOriginLine and Theme.C.gridMajor
+                        or (isMajor and Theme.C.gridMajor or Theme.C.gridMinor)
+                    render.setRGBA(c[1], c[2], c[3], c[4])
+
+                    local offset = i * spacing
+                    setVec(pA, ox - span, oy + offset, oz)
+                    setVec(pB, ox + span, oy + offset, oz)
+                    render.draw3DLine(pA, pB, true)
+
+                    setVec(pA, ox + offset, oy - span, oz)
+                    setVec(pB, ox + offset, oy + span, oz)
+                    render.draw3DLine(pA, pB, true)
+                end
+            end
+        end
+
+        if g.showAxes then
+            local axisLen = math.max(spacing * 2, span)
+            Theme.setColor(Theme.C.axisX, 230)
+            setVec(pA, ox, oy, oz)
+            setVec(pB, ox + axisLen, oy, oz)
+            render.draw3DLine(pA, pB, true)
+            Theme.setColor(Theme.C.axisX, 75)
+            setVec(pB, ox - span, oy, oz)
+            render.draw3DLine(pA, pB, true)
+
+            Theme.setColor(Theme.C.axisY, 230)
+            setVec(pA, ox, oy, oz)
+            setVec(pB, ox, oy + axisLen, oz)
+            render.draw3DLine(pA, pB, true)
+            Theme.setColor(Theme.C.axisY, 75)
+            setVec(pB, ox, oy - span, oz)
+            render.draw3DLine(pA, pB, true)
+
+            Theme.setColor(Theme.C.axisZ, 235)
+            setVec(pA, ox, oy, oz)
+            setVec(pB, ox, oy, oz + math.min(axisLen, spacing * 4))
+            render.draw3DLine(pA, pB, true)
+        end
+
+        if g.showOriginMarker then
+            local r = math.max(4, spacing * 0.14)
+            Theme.setColor(Theme.C.warning, 220)
+            setVec(pA, ox - r, oy - r, oz)
+            setVec(pB, ox + r, oy + r, oz)
+            render.draw3DLine(pA, pB, true)
+            setVec(pA, ox - r, oy + r, oz)
+            setVec(pB, ox + r, oy - r, oz)
+            render.draw3DLine(pA, pB, true)
+        end
+    end
+
+    local function drawOrientationTriad(cx, cy, radius, ang)
+        Theme.setColor(Theme.C.hudPill)
+        render.drawFilledCircle(cx, cy, radius + 12)
+        Theme.setColor(Theme.C.borderLight)
+        render.drawCircle(cx, cy, radius + 12)
+
+        local fwd = ang:getForward()
+        local right = ang:getRight()
+        local up = ang:getUp()
+
+        local items = {}
+        for i = 1, 3 do
+            local a = AXIS_VECS[i]
+            items[i] = {
+                label = a.label,
+                color = a.color,
+                sx = a.vec:dot(right),
+                sy = -a.vec:dot(up),
+                depth = a.vec:dot(fwd),
+            }
+        end
+        table.sort(items, function(a, b) return a.depth < b.depth end)
+
+        render.setFont(Theme.Fonts.Small)
+        for _, item in ipairs(items) do
+            local ex = cx + item.sx * radius
+            local ey = cy + item.sy * radius
+            local alpha = item.depth < -0.15 and 120 or 255
+            Theme.setColor(item.color, alpha)
+            render.drawLine(cx, cy, ex, ey)
+            render.drawFilledCircle(ex, ey, 7)
+            Theme.setColor(Theme.C.textPrimary, alpha)
+            render.drawSimpleText(ex, ey, item.label, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+        end
+    end
+
+    function ViewportGrid.updateLookMode(state, ui, vpRect)
+        if not state.studioOpen then
+            state.viewportLooking = false
+            return
+        end
+
+        local inViewport = ui:pointInRect(vpRect.x, vpRect.y, vpRect.w, vpRect.h)
+        if ui.rightPressed and inViewport and not ui.activeId and not ui.focusedInputId then
+            state.viewportLooking = true
+            if hasPermission("input.enablecursor") then
+                input.enableCursor(false)
+            end
+        elseif state.viewportLooking and not ui.rightDown then
+            state.viewportLooking = false
+            if hasPermission("input.enablecursor") then
+                input.enableCursor(true)
+            end
+        end
+    end
+
+    function ViewportGrid.drawOverlay(state, ui, vpRect, fpsSmooth, camera, sceneGraph)
+        local x, y, w, h = vpRect.x, vpRect.y, vpRect.w, vpRect.h
+        if w < 40 or h < 40 then return end
+
+        ui:pushClip(x, y, w, h)
+
+        Theme.setColor(state.viewportLooking and Theme.C.accent or Theme.C.border)
+        render.drawRectOutline(x, y, w, h, 1)
+
+        -- Top-left Freecam / Selection hint pill
+        local pillX = x + 10
+        local pillY = y + 10
+        local modeStr = state.viewportLooking
+            and string.format("FREECAM  |  Speed: %d u/s (Shift: x%.1f)  |  Release RMB for cursor", state.camera.speed, state.camera.boostMult)
+            or "Freecam: Hold RMB + WASD/Space/Ctrl  |  Click: Select  |  F: Focus  |  Del: Delete"
+        render.setFont(Theme.Fonts.Small)
+        local tw = render.getTextSize(modeStr)
+        local pw = math.min(w - 110, tw + 18)
+        Theme.setColor(Theme.C.hudPill)
+        render.drawRectFast(pillX, pillY, pw, 22)
+        Theme.setColor(state.viewportLooking and Theme.C.accent or Theme.C.border)
+        render.drawRectOutline(pillX, pillY, pw, 22, 1)
+        Theme.setColor(state.viewportLooking and Theme.C.accentBright or Theme.C.textSecondary)
+        render.drawSimpleText(pillX + 9, pillY + 11, modeStr, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        -- Top-right 3D Orientation Triad synced with Freecam angle
+        if state.grid.showOrientationGizmo and w > 180 and h > 140 then
+            local triadAng = (camera and camera.initialized) and camera.camAng or eyeAngles()
+            drawOrientationTriad(x + w - 42, y + 42, 22, triadAng)
+        end
+
+        -- Bottom-left live telemetry & selection readout
+        if state.grid.showTelemetry then
+            local cpuMs = cpuAverage() * 1000
+            local maxMs = cpuMax() * 1000
+            local ramMb = ramUsed() / 1024
+            local holos = hologram.hologramsLeft()
+            local selCount = #sceneGraph:getSelectedIds()
+            local selNode = sceneGraph:getSelectedNode()
+            local selText = selCount == 0 and "None"
+                or (selCount == 1 and (selNode and selNode.name or "?") or (selCount .. " objects"))
+
+            local statsStr = string.format(
+                "FPS: %d  |  CPU: %.2f/%.1fms  |  RAM: %.1fMB  |  Holos: %d  |  Cam: %d u/s FOV %d  |  Sel: %s",
+                math.round(fpsSmooth),
+                cpuMs,
+                maxMs,
+                ramMb,
+                holos,
+                state.camera.speed,
+                state.camera.fov,
+                selText
+            )
+            render.setFont(Theme.Fonts.Mono)
+            local sw = render.getTextSize(statsStr)
+            local bx = x + 10
+            local by = y + h - 30
+            local bw = math.min(w - 20, sw + 16)
+            Theme.setColor(Theme.C.hudPill)
+            render.drawRectFast(bx, by, bw, 20)
+            Theme.setColor(Theme.C.border)
+            render.drawRectOutline(bx, by, bw, 20, 1)
+
+            local cpuWarn = (cpuMs / math.max(0.001, maxMs)) > 0.7
+            Theme.setColor(cpuWarn and Theme.C.warning or Theme.C.textSecondary)
+            render.drawSimpleText(bx + 8, by + 10, statsStr, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+        end
+
+        ui:popClip()
+    end
+
+    SOLACE.ViewportGrid = ViewportGrid
+
+    -- 14.2 Top Studio Toolbar
+
+
+    local Toolbar = {}
+
+    function Toolbar.draw(ui, state, layout, rect, actions)
+        local x, y, w, h = rect.x, rect.y, rect.w, rect.h
+        if w < 100 or h <= 0 then return end
+
+        Theme.setColor(Theme.C.bgToolbar)
+        render.drawRectFast(x, y, w, h)
+        Theme.setColor(Theme.C.border)
+        render.drawLine(x, y + h - 1, x + w, y + h - 1)
+
+        ui:pushClip(x, y, w, h)
+
+        local cx = x + 10
+        local btnH = 26
+        local by = y + math.floor((h - btnH) * 0.5)
+
+        -- Brand identity badge
+        render.setFont(Theme.Fonts.Title)
+        Theme.setColor(Theme.C.accentBright)
+        render.drawSimpleText(cx, y + h * 0.5, Constants.APP_NAME, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+        local nw = render.getTextSize(Constants.APP_NAME)
+        cx = cx + nw + 8
+
+        render.setFont(Theme.Fonts.Small)
+        Theme.setColor(Theme.C.textMuted)
+        render.drawSimpleText(cx, y + h * 0.5, "P2", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+        cx = cx + 22
+
+        Theme.setColor(Theme.C.border)
+        render.drawLine(cx, y + 7, cx, y + h - 7)
+        cx = cx + 8
+
+        -- Tool buttons
+        for _, tool in ipairs(Constants.TOOLS) do
+            local tw = tool.ready and 72 or 84
+            if cx + tw > x + w - 260 then break end
+            local clicked = Widgets.button(ui, "tb_tool_" .. tool.id, cx, by, tw, btnH, tool.label, {
+                icon = tool.icon,
+                active = tool.ready and (state.activeTool == tool.id),
+                disabled = not tool.ready,
+                badge = (not tool.ready) and ("P" .. tool.phase) or nil,
+                tooltip = tool.desc,
+            })
+            if clicked and tool.ready then
+                state.activeTool = tool.id
+            end
+            cx = cx + tw + 4
+        end
+
+        Theme.setColor(Theme.C.border)
+        render.drawLine(cx + 2, y + 7, cx + 2, y + h - 7)
+        cx = cx + 10
+
+        -- Phase 2 Quick Actions: Focus Selected & Quick Spawn Cube
+        if cx + 70 < x + w - 280 then
+            if Widgets.button(ui, "tb_focus", cx, by, 68, btnH, "Focus", {
+                icon = "camera",
+                disabled = not actions.hasSelection,
+                tooltip = "Focus Freecam on Selected Object (Hotkey: F)",
+            }) then
+                actions.focusSelected()
+            end
+            cx = cx + 72
+        end
+
+        if cx + 74 < x + w - 280 then
+            if Widgets.button(ui, "tb_spawn_cube", cx, by, 72, btnH, "+Cube", {
+                icon = "cube",
+                tooltip = "Spawn Cube Hologram in front of Freecam",
+            }) then
+                actions.spawnQuickModel("Cube", "models/hunter/blocks/cube1x1x1.mdl")
+            end
+            cx = cx + 76
+        end
+
+        -- Viewport Toggles
+        if cx + 66 < x + w - 280 then
+            if Widgets.button(ui, "tb_grid", cx, by, 62, btnH, "Grid", {
+                icon = "grid",
+                active = state.grid.enabled,
+                tooltip = "Toggle 3D Ground Grid (G)",
+            }) then
+                state.grid.enabled = not state.grid.enabled
+            end
+            cx = cx + 66
+        end
+
+        if cx + 66 < x + w - 280 then
+            if Widgets.button(ui, "tb_axes", cx, by, 62, btnH, "Axes", {
+                icon = "axes",
+                active = state.grid.showAxes,
+                tooltip = "Toggle 3D Origin Axes",
+            }) then
+                state.grid.showAxes = not state.grid.showAxes
+            end
+            cx = cx + 66
+        end
+
+        if cx + 68 < x + w - 280 then
+            if Widgets.button(ui, "tb_stats", cx, by, 64, btnH, "Stats", {
+                icon = "scene",
+                active = state.grid.showTelemetry,
+                tooltip = "Toggle Viewport Telemetry HUD",
+            }) then
+                state.grid.showTelemetry = not state.grid.showTelemetry
+            end
+            cx = cx + 68
+        end
+
+        -- Upcoming Transport / History / Project buttons
+        local upcoming = {
+            { id = "undo",   icon = "undo",   w = 30, tip = "Undo — Arriving in Phase 3" },
+            { id = "redo",   icon = "redo",   w = 30, tip = "Redo — Arriving in Phase 3" },
+            { id = "save",   icon = "save",   w = 56, label = "Save",   tip = "Save Project — Arriving in Phase 12" },
+            { id = "export", icon = "export", w = 68, label = "Export", tip = "Export StarfallEx Lua — Arriving in Phase 13" },
+        }
+        if cx + 195 < x + w - 290 then
+            Theme.setColor(Theme.C.border)
+            render.drawLine(cx + 2, y + 7, cx + 2, y + h - 7)
+            cx = cx + 10
+            for _, item in ipairs(upcoming) do
+                if cx + item.w > x + w - 290 then break end
+                Widgets.button(ui, "tb_" .. item.id, cx, by, item.w, btnH, item.label, {
+                    icon = item.icon,
+                    disabled = true,
+                    tooltip = item.tip,
+                })
+                cx = cx + item.w + 4
+            end
+        end
+
+        -- Right-aligned working panel toggles, Reset Layout & Hide Studio (F6)
+        local rx = x + w - 10
+
+        local hideW = 78
+        rx = rx - hideW
+        if Widgets.button(ui, "tb_hide", rx, by, hideW, btnH, "Hide F6", {
+            icon = "hide",
+            tooltip = "Minimize SOLACE Studio and restore gameplay camera/cursor (Press F6 to reopen)",
+        }) then
+            actions.toggleStudio(false)
+        end
+        rx = rx - 6
+
+        local resetW = 54
+        rx = rx - resetW
+        if Widgets.button(ui, "tb_reset_layout", rx, by, resetW, btnH, "Reset", {
+            icon = "reset",
+            tooltip = "Reset all dock panel sizes to default",
+        }) then
+            layout:reset()
+        end
+        rx = rx - 8
+
+        local panelDefs = {
+            { key = "timeline",   label = "TL",   tip = "Toggle Timeline Panel" },
+            { key = "properties", label = "Prop", tip = "Toggle Properties Panel" },
+            { key = "explorer",   label = "Exp",  tip = "Toggle Explorer Panel" },
+            { key = "toolbox",    label = "Box",  tip = "Toggle Toolbox Panel" },
+        }
+        for _, p in ipairs(panelDefs) do
+            local pw = 40
+            rx = rx - pw
+            if rx > cx + 8 then
+                if Widgets.button(ui, "tb_panel_" .. p.key, rx, by, pw, btnH, p.label, {
+                    active = state.panels[p.key],
+                    tooltip = p.tip,
+                }) then
+                    state.panels[p.key] = not state.panels[p.key]
+                end
+            end
+            rx = rx - 3
+        end
+
+        ui:popClip()
+    end
+
+    SOLACE.Toolbar = Toolbar
+
+    -- 14.3 Right-Top Scene Explorer
+
+
+    local Explorer = {
+        _scrollY = 0,
+        _contentH = 0,
+    }
+
+    local KIND_ICONS = {
+        [Constants.NODE_KINDS.ROOT]     = "scene",
+        [Constants.NODE_KINDS.FOLDER]   = "layers",
+        [Constants.NODE_KINDS.GROUP]    = "layers",
+        [Constants.NODE_KINDS.MODEL]    = "cube",
+        [Constants.NODE_KINDS.HOLOGRAM] = "holo",
+        [Constants.NODE_KINDS.CAMERA]   = "camera",
+        [Constants.NODE_KINDS.SPRITE]   = "sparkle",
+        [Constants.NODE_KINDS.EFFECT]   = "burst",
+        [Constants.NODE_KINDS.DECAL]    = "stamp",
+    }
+
+    function Explorer.draw(ui, state, sceneGraph, rect, actions)
+        if rect.w <= 0 or rect.h <= 0 then return end
+
+        local count = sceneGraph:getNodeCount()
+        local countStr = string.format("%d node%s", count, count == 1 and "" or "s")
+        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Explorer", countStr)
+        if bw < 20 or bh < 60 then return end
+
+        local pad = Theme.Metrics.pad
+        local topBarH = 56
+        local listY = by + topBarH
+        local listH = math.max(0, bh - topBarH)
+
+        -- Scroll tree area with mouse wheel
+        if ui.wheelDelta ~= 0 and ui:pointInRect(bx, listY, bw, listH) then
+            Explorer._scrollY = Explorer._scrollY - ui.wheelDelta * 24
+        end
+        local maxScroll = math.max(0, Explorer._contentH - listH)
+        Explorer._scrollY = math.clamp(Explorer._scrollY, 0, maxScroll)
+
+        ui:pushClip(bx, by, bw, bh)
+
+        -- Search box
+        Widgets.textBox(
+            ui,
+            "explorer_search",
+            bx + pad,
+            by + 6,
+            bw - pad * 2,
+            22,
+            function() return state.explorerSearch end,
+            function(v) state.explorerSearch = v end,
+            "Search scene hierarchy...",
+            "Filter Scene IR nodes by name or kind"
+        )
+
+        -- Quick hierarchy toolbar strip
+        local actY = by + 32
+        local gap = 4
+        local btnW = math.floor((bw - pad * 2 - gap * 3) / 4)
+        local selNode = sceneGraph:getSelectedNode()
+        local canDelete = (selNode ~= nil and selNode.id ~= sceneGraph:getRootId())
+
+        if Widgets.button(ui, "exp_add_grp", bx + pad, actY, btnW, 20, "+Grp", {
+            tooltip = "Create Group under selected container or root",
+        }) then
+            actions.spawnGroup()
+        end
+        if Widgets.button(ui, "exp_add_fld", bx + pad + (btnW + gap), actY, btnW, 20, "+Fld", {
+            tooltip = "Create Folder under selected container or root",
+        }) then
+            actions.spawnFolder()
+        end
+        if Widgets.button(ui, "exp_focus", bx + pad + (btnW + gap) * 2, actY, btnW, 20, "Focus", {
+            disabled = not canDelete,
+            tooltip = "Focus Freecam on selected object (F)",
+        }) then
+            actions.focusSelected()
+        end
+        if Widgets.button(ui, "exp_del", bx + pad + (btnW + gap) * 3, actY, btnW, 20, "Del", {
+            disabled = not canDelete,
+            tooltip = "Delete selected object(s) (Delete)",
+        }) then
+            actions.deleteSelected()
+        end
+
+        Theme.setColor(Theme.C.border)
+        render.drawLine(bx, listY - 1, bx + bw, listY - 1)
+
+        -- Scrollable tree body
+        ui:pushClip(bx, listY, bw, listH)
+
+        local rows = sceneGraph:getFlatHierarchy(state.explorerSearch)
+        local rowH = Theme.Metrics.rowH
+        local primaryId = sceneGraph:getSelectedId()
+        local curY = listY + 4 - Explorer._scrollY
+        local startY = curY
+
+        for _, item in ipairs(rows) do
+            local node = item.node
+            if curY + rowH >= listY and curY <= listY + listH then
+                local indent = 8 + item.depth * 14
+                local isSel = sceneGraph:isSelected(node.id)
+                local isPrimary = (node.id == primaryId)
+                local rowId = "exp_row_" .. node.id
+                local eyeSize = 18
+                local eyeX = bx + bw - eyeSize - (maxScroll > 0 and 10 or 6)
+
+                local hot, _ = ui:hitTest(rowId, bx + 2, curY, bw - 4, rowH)
+
+                if isSel then
+                    Theme.setColor(Theme.C.bgSelectionRow, isPrimary and 120 or 75)
+                    render.drawRectFast(bx + 2, curY, bw - 4, rowH)
+                    Theme.setColor(isPrimary and Theme.C.accentBright or Theme.C.accent)
+                    render.drawRectFast(bx + 2, curY, 2, rowH)
+                elseif hot then
+                    Theme.setColor(Theme.C.bgControlHover, 140)
+                    render.drawRectFast(bx + 2, curY, bw - 4, rowH)
+                end
+
+                -- Expand / collapse chevron
+                local handledClick = false
+                if item.hasChildren then
+                    local chevX = bx + indent
+                    local chevHot, _ = ui:hitTest("exp_chev_" .. node.id, chevX - 2, curY, 16, rowH)
+                    Theme.drawIcon(
+                        node.expanded and "chevronDown" or "chevronRight",
+                        chevX,
+                        curY + (rowH - 12) * 0.5,
+                        12,
+                        chevHot and Theme.C.textPrimary or Theme.C.textMuted
+                    )
+                    if chevHot and ui.leftPressed then
+                        node.expanded = not node.expanded
+                        handledClick = true
+                    end
+                end
+
+                -- Visibility toggle eye button (non-root nodes)
+                if node.id ~= sceneGraph:getRootId() then
+                    local eyeHot, _ = ui:hitTest("exp_eye_" .. node.id, eyeX, curY, eyeSize, rowH)
+                    if eyeHot then
+                        ui:setTooltip(node.visible and "Hide object" or "Show object")
+                    end
+                    Theme.drawIcon(
+                        "eye",
+                        eyeX + 2,
+                        curY + (rowH - 13) * 0.5,
+                        13,
+                        node.visible and (eyeHot and Theme.C.textPrimary or Theme.C.textSecondary) or Theme.C.textDisabled
+                    )
+                    if eyeHot and ui.leftPressed then
+                        sceneGraph:toggleNodeVisible(node.id)
+                        handledClick = true
+                    end
+                end
+
+                -- Row selection (supports Ctrl+Click multi-select)
+                if hot and ui.leftPressed and not handledClick then
+                    local ctrl = hasPermission("input") and input.isControlDown() or false
+                    if ctrl then
+                        sceneGraph:toggleSelectedId(node.id)
+                    else
+                        sceneGraph:setSelectedId(node.id)
+                    end
+                end
+
+                local iconX = bx + indent + 15
+                local iconName = KIND_ICONS[node.kind] or "cube"
+                local textAlpha = node.visible and 255 or 120
+                Theme.drawIcon(
+                    iconName,
+                    iconX,
+                    curY + (rowH - 13) * 0.5,
+                    13,
+                    isSel and Theme.C.accentBright or Theme.C.textSecondary,
+                    textAlpha
+                )
+
+                render.setFont(isSel and Theme.Fonts.BodyBold or Theme.Fonts.Body)
+                Theme.setColor(isSel and Theme.C.textPrimary or Theme.C.textSecondary, textAlpha)
+                render.drawSimpleText(iconX + 18, curY + rowH * 0.5, node.name, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+                render.setFont(Theme.Fonts.Small)
+                Theme.setColor(Theme.C.textMuted, textAlpha)
+                render.drawSimpleText(eyeX - 6, curY + rowH * 0.5, node.kind, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+            end
+            curY = curY + rowH
+        end
+
+        Explorer._contentH = (curY - startY) + 8
+
+        if maxScroll > 0 then
+            local barW = 4
+            local barX = bx + bw - barW - 2
+            local trackH = listH - 4
+            local thumbH = math.max(20, math.floor(trackH * (listH / Explorer._contentH)))
+            local thumbY = listY + 2 + math.floor((trackH - thumbH) * (Explorer._scrollY / maxScroll))
+            Theme.setColor(Theme.C.bgInput)
+            render.drawRectFast(barX, listY + 2, barW, trackH)
+            Theme.setColor(Theme.C.borderLight)
+            render.drawRectFast(barX, thumbY, barW, thumbH)
+        end
+
+        ui:popClip()
+        ui:popClip()
+    end
+
+    SOLACE.Explorer = Explorer
+
+    -- 14.4 Right-Bottom Properties Inspector
+
+
+    local Properties = {
+        _scrollY = 0,
+        _contentH = 0,
+    }
+
+    function Properties.draw(ui, state, sceneGraph, runtime, camera, rect, actions)
+        if rect.w <= 0 or rect.h <= 0 then return end
+
+        local sel = sceneGraph:getSelectedNode()
+        local selCount = #sceneGraph:getSelectedIds()
+        local rightLabel = selCount > 1 and (selCount .. " selected") or (sel and sel.name or "No Selection")
+        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Properties", rightLabel)
+        if bw < 20 or bh < 40 then return end
+
+        if ui.wheelDelta ~= 0 and ui:pointInRect(bx, by, bw, bh) then
+            Properties._scrollY = Properties._scrollY - ui.wheelDelta * 28
+        end
+        local maxScroll = math.max(0, Properties._contentH - bh)
+        Properties._scrollY = math.clamp(Properties._scrollY, 0, maxScroll)
+
+        ui:pushClip(bx, by, bw, bh)
+
+        local pad = Theme.Metrics.pad
+        local rowH = Theme.Metrics.controlH
+        local innerW = bw - pad * 2 - (maxScroll > 0 and 8 or 0)
+        local curY = by + pad - Properties._scrollY
+        local startY = curY
+
+        -- 1. Selected Object
+        state.sections.selection = Widgets.sectionHeader(ui, "sec_selection", bx, curY, bw, 22, "Selection", state.sections.selection)
+        curY = curY + 26
+        if state.sections.selection then
+            if sel then
+                local isRoot = (sel.id == sceneGraph:getRootId())
+
+                if not isRoot then
+                    Widgets.textBox(
+                        ui,
+                        "prop_node_name_" .. sel.id,
+                        bx + pad,
+                        curY,
+                        innerW,
+                        22,
+                        function() return sel.name end,
+                        function(v) sceneGraph:renameNode(sel.id, v) end,
+                        "Object name...",
+                        "Rename selected object"
+                    )
+                    curY = curY + 26
+                end
+
+                Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Kind", sel.kind, Theme.C.accentBright)
+                curY = curY + 19
+                Widgets.keyValueRow(bx + pad, curY, innerW, 18, "IR ID", sel.id, Theme.C.textMuted)
+                curY = curY + 19
+
+                if sel.appearance.model and sel.appearance.model ~= "" then
+                    local shortMdl = string.getFileFromFilename(sel.appearance.model) or sel.appearance.model
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Model", shortMdl, Theme.C.textSecondary)
+                    curY = curY + 19
+                elseif sel.appearance.material and sel.appearance.material ~= "" then
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Material", sel.appearance.material, Theme.C.textSecondary)
+                    curY = curY + 19
+                end
+
+                if not isRoot then
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Position", Utils.fmtVec3(sel.transform.pos, 1))
+                    curY = curY + 19
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Rotation", Utils.fmtVec3(sel.transform.ang, 1))
+                    curY = curY + 19
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Scale", Utils.fmtVec3(sel.transform.scale, 2))
+                    curY = curY + 22
+
+                    local entry = runtime:getEntry(sel.id)
+                    if entry and entry.errorMsg then
+                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Runtime", entry.errorMsg, Theme.C.danger)
+                        curY = curY + 20
+                    end
+
+                    local thirdW = math.floor((innerW - 8) / 3)
+                    if Widgets.button(ui, "prop_vis", bx + pad, curY, thirdW, rowH, sel.visible and "Visible" or "Hidden", {
+                        active = sel.visible,
+                        tooltip = "Toggle object visibility",
+                    }) then
+                        sceneGraph:toggleNodeVisible(sel.id)
+                    end
+                    if Widgets.button(ui, "prop_focus", bx + pad + thirdW + 4, curY, thirdW, rowH, "Focus", {
+                        tooltip = "Move Freecam to frame this object (F)",
+                    }) then
+                        actions.focusSelected()
+                    end
+                    if Widgets.button(ui, "prop_del", bx + pad + (thirdW + 4) * 2, curY, innerW - (thirdW + 4) * 2, rowH, "Delete", {
+                        tooltip = "Delete selected object(s) (Del)",
+                    }) then
+                        actions.deleteSelected()
+                    end
+                    curY = curY + rowH + 6
+                end
+
+                local nh = Widgets.phaseNotice(
+                    bx + pad, curY, innerW,
+                    "Interactive Transform Gizmos",
+                    { "Move / Rotate / Scale editing & numeric", "transform boxes arrive in Phase 3 & 4." },
+                    "Phase 3-4"
+                )
+                curY = curY + nh + 8
+            else
+                Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Selection", "None (Click object in viewport)", Theme.C.textMuted)
+                curY = curY + 24
+            end
+        end
+
+        -- 2. Freecam Camera (live)
+        state.sections.camera = Widgets.sectionHeader(ui, "sec_camera", bx, curY, bw, 22, "Freecam Camera", state.sections.camera)
+        curY = curY + 26
+        if state.sections.camera then
+            local c = state.camera
+            local spd, spdChanged = Widgets.slider(
+                ui, "prop_cam_spd", bx + pad, curY, innerW, rowH,
+                "Move Speed", c.speed, Constants.CAMERA_DEFAULTS.minSpeed, Constants.CAMERA_DEFAULTS.maxSpeed, 10, "%.0f u/s",
+                "Freecam base movement speed (Mouse wheel in viewport adjusts this)"
+            )
+            if spdChanged then c.speed = spd end
+            curY = curY + rowH + 4
+
+            local bst, bstChanged = Widgets.slider(
+                ui, "prop_cam_bst", bx + pad, curY, innerW, rowH,
+                "Shift Boost", c.boostMult, 1.5, 6.0, 0.25, "x%.2f",
+                "Speed multiplier while holding Shift"
+            )
+            if bstChanged then c.boostMult = bst end
+            curY = curY + rowH + 4
+
+            local sens, sensChanged = Widgets.slider(
+                ui, "prop_cam_sens", bx + pad, curY, innerW, rowH,
+                "Mouse Sens", c.sensitivity, 0.04, 0.50, 0.01, "%.2f",
+                "Mouse look sensitivity while holding Right Mouse Button"
+            )
+            if sensChanged then c.sensitivity = sens end
+            curY = curY + rowH + 4
+
+            local fov, fovChanged = Widgets.slider(
+                ui, "prop_cam_fov", bx + pad, curY, innerW, rowH,
+                "Field of View", c.fov, 45, 115, 1, "%.0f deg",
+                "Viewport camera vertical field of view"
+            )
+            if fovChanged then c.fov = fov end
+            curY = curY + rowH + 4
+
+            local sm, smChanged = Widgets.slider(
+                ui, "prop_cam_sm", bx + pad, curY, innerW, rowH,
+                "Smoothing", c.smoothing, 4, 40, 1, "%.0f",
+                "Camera motion damping (40 = crisp / instant)"
+            )
+            if smChanged then c.smoothing = sm end
+            curY = curY + rowH + 4
+
+            if Widgets.button(ui, "prop_cam_reset", bx + pad, curY, innerW, rowH, "Snap Camera to Player", {
+                icon = "camera",
+                tooltip = "Move Freecam back to your player's eye position",
+            }) then
+                camera:resetToPlayer()
+            end
+            curY = curY + rowH + 8
+        end
+
+        -- 3. Viewport Grid (live)
+        state.sections.grid = Widgets.sectionHeader(ui, "sec_grid", bx, curY, bw, 22, "Viewport Grid", state.sections.grid)
+        curY = curY + 26
+        if state.sections.grid then
+            local g = state.grid
+
+            if Widgets.button(ui, "prop_grid_en", bx + pad, curY, innerW, rowH,
+                "Ground Grid: " .. (g.enabled and "Visible" or "Hidden"),
+                { active = g.enabled, icon = "grid", tooltip = "Toggle 3D reference grid (Hotkey: G)" }
+            ) then
+                g.enabled = not g.enabled
+            end
+            curY = curY + rowH + 4
+
+            local prevSp, nextSp = Widgets.stepper(
+                ui, "prop_grid_sp", bx + pad, curY, innerW, rowH,
+                "Cell Spacing", tostring(g.spacing) .. " u",
+                "Grid cell size in Hammer units"
+            )
+            if prevSp then g.spacing = Utils.cycleOption(Constants.GRID_SPACING_OPTIONS, g.spacing, -1) end
+            if nextSp then g.spacing = Utils.cycleOption(Constants.GRID_SPACING_OPTIONS, g.spacing, 1) end
+            curY = curY + rowH + 4
+
+            local newExt, extChanged = Widgets.slider(
+                ui, "prop_grid_ext", bx + pad, curY, innerW, rowH,
+                "Grid Radius", g.halfExtents, 4, 24, 1, "%.0f cells",
+                "Number of grid cells from origin in each direction"
+            )
+            if extChanged then g.halfExtents = newExt end
+            curY = curY + rowH + 8
+        end
+
+        -- 4. Studio Origin & HUD
+        state.sections.origin = Widgets.sectionHeader(ui, "sec_origin", bx, curY, bw, 22, "Studio Origin & HUD", state.sections.origin)
+        curY = curY + 26
+        if state.sections.origin then
+            local g = state.grid
+            local prevOr, nextOr = Widgets.stepper(
+                ui, "prop_origin_mode", bx + pad, curY, innerW, rowH,
+                "Origin Anchor", string.upper(g.originMode),
+                "Center studio grid on Chip, Player, or World (0,0,0)"
+            )
+            if prevOr then
+                g.originMode = Utils.cycleOption(Constants.ORIGIN_MODES, g.originMode, -1)
+                actions.resolveOrigin()
+            end
+            if nextOr then
+                g.originMode = Utils.cycleOption(Constants.ORIGIN_MODES, g.originMode, 1)
+                actions.resolveOrigin()
+            end
+            curY = curY + rowH + 4
+
+            local halfW = math.floor((innerW - 4) * 0.5)
+            if Widgets.button(ui, "prop_triad", bx + pad, curY, halfW, rowH, "3D Triad", {
+                active = g.showOrientationGizmo,
+                tooltip = "Toggle top-right 3D axis orientation widget",
+            }) then
+                g.showOrientationGizmo = not g.showOrientationGizmo
+            end
+            if Widgets.button(ui, "prop_telem", bx + pad + halfW + 4, curY, innerW - halfW - 4, rowH, "Telemetry", {
+                active = g.showTelemetry,
+                tooltip = "Toggle bottom-left performance telemetry pill",
+            }) then
+                g.showTelemetry = not g.showTelemetry
+            end
+            curY = curY + rowH + 8
+        end
+
+        -- 5. StarfallEx Quotas & Permissions
+        state.sections.quotas = Widgets.sectionHeader(ui, "sec_quotas", bx, curY, bw, 22, "StarfallEx Runtime", state.sections.quotas)
+        curY = curY + 26
+        if state.sections.quotas then
+            local cpuMs = cpuAverage() * 1000
+            local maxMs = cpuMax() * 1000
+            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "CPU Avg / Cap", string.format("%.2f / %.1f ms", cpuMs, maxMs))
+            curY = curY + 19
+            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "RAM Used", string.format("%.1f MB", ramUsed() / 1024))
+            curY = curY + 19
+            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Holograms Left", tostring(hologram.hologramsLeft()))
+            curY = curY + 19
+            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "render.calcview", hasPermission("render.calcview") and "OK" or "Denied",
+                hasPermission("render.calcview") and Theme.C.success or Theme.C.danger)
+            curY = curY + 19
+            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "hologram.create", hasPermission("hologram.create") and "OK" or "Pending",
+                hasPermission("hologram.create") and Theme.C.success or Theme.C.warning)
+            curY = curY + 24
+        end
+
+        Properties._contentH = (curY - startY) + pad
+
+        if maxScroll > 0 then
+            local barW = 4
+            local barX = bx + bw - barW - 2
+            local trackH = bh - 4
+            local thumbH = math.max(24, math.floor(trackH * (bh / Properties._contentH)))
+            local thumbY = by + 2 + math.floor((trackH - thumbH) * (Properties._scrollY / maxScroll))
+            Theme.setColor(Theme.C.bgInput)
+            render.drawRectFast(barX, by + 2, barW, trackH)
+            Theme.setColor(Theme.C.borderLight)
+            render.drawRectFast(barX, thumbY, barW, thumbH)
+        end
+
+        ui:popClip()
+    end
+
+    SOLACE.Properties = Properties
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 15: Timeline
+-- ============================================================================
+(function(SOLACE)
+    local Constants = SOLACE.Constants
+    local Utils = SOLACE.Utils
+    local Theme = SOLACE.Theme
+    local Widgets = SOLACE.Widgets
+
+
+
+    local Timeline = {}
+
+    local function cycleFps(current, dir)
+        local opts = Constants.FPS_OPTIONS
+        local idx = 2
+        for i, v in ipairs(opts) do
+            if v == current then idx = i break end
+        end
+        idx = ((idx - 1 + dir) % #opts) + 1
+        return opts[idx]
+    end
+
+    function Timeline.draw(ui, state, sceneGraph, rect)
+        if rect.w <= 0 or rect.h <= 0 then return end
+
+        local tl = state.timeline
+        local frameIdx = math.floor(tl.currentTime * tl.fps + 0.5)
+        local totalFrames = math.floor(tl.duration * tl.fps + 0.5)
+        local rightBadge = string.format("%s / %s  |  F %d / %d (%d FPS)",
+            Utils.formatTimecode(tl.currentTime),
+            Utils.formatTimecode(tl.duration),
+            frameIdx,
+            totalFrames,
+            tl.fps
+        )
+
+        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Timeline", rightBadge)
+        if bw < 160 or bh < 60 then return end
+
+        ui:pushClip(bx, by, bw, bh)
+
+        -- Transport & ruler strip
+        local stripH = 28
+        local headerColW = math.min(230, math.floor(bw * 0.28))
+
+        Theme.setColor(Theme.C.bgPanelAlt)
+        render.drawRectFast(bx, by, bw, stripH)
+        Theme.setColor(Theme.C.border)
+        render.drawLine(bx, by + stripH - 1, bx + bw, by + stripH - 1)
+        render.drawLine(bx + headerColW, by, bx + headerColW, by + bh)
+
+        -- Left transport controls
+        local tx = bx + 6
+        local ty = by + 3
+        local btnH = 22
+
+        Widgets.button(ui, "tl_play", tx, ty, 26, btnH, nil, {
+            icon = "play", disabled = true, tooltip = "Play Sequence — Arriving in Phase 8",
+        })
+        tx = tx + 29
+        Widgets.button(ui, "tl_stop", tx, ty, 26, btnH, nil, {
+            icon = "stop", disabled = true, tooltip = "Stop Sequence — Arriving in Phase 8",
+        })
+        tx = tx + 32
+
+        if Widgets.button(ui, "tl_fps", tx, ty, 52, btnH, tostring(tl.fps) .. "fps", {
+            tooltip = "Cycle Timeline Frame Rate (24 / 30 / 60 FPS)",
+        }) then
+            tl.fps = cycleFps(tl.fps, 1)
+        end
+        tx = tx + 56
+
+        if Widgets.button(ui, "tl_dur_minus", tx, ty, 20, btnH, "-", {
+            tooltip = "Decrease sequence duration (-5s)",
+        }) then
+            tl.duration = math.max(2, tl.duration - 5)
+            tl.currentTime = math.min(tl.currentTime, tl.duration)
+        end
+        tx = tx + 21
+        if Widgets.button(ui, "tl_dur_plus", tx, ty, 20, btnH, "+", {
+            tooltip = "Increase sequence duration (+5s)",
+        }) then
+            tl.duration = math.min(120, tl.duration + 5)
+        end
+        tx = tx + 24
+
+        if Widgets.button(ui, "tl_zoom_out", tx, ty, 20, btnH, "z-", {
+            tooltip = "Zoom Out Timeline",
+        }) then
+            tl.zoom = math.clamp(tl.zoom * 0.8, 25, 320)
+        end
+        tx = tx + 21
+        if Widgets.button(ui, "tl_zoom_in", tx, ty, 20, btnH, "z+", {
+            tooltip = "Zoom In Timeline",
+        }) then
+            tl.zoom = math.clamp(tl.zoom * 1.25, 25, 320)
+        end
+
+        -- Right interactive Time Ruler
+        local rulerX = bx + headerColW + 1
+        local rulerW = math.max(40, bw - headerColW - 1)
+        local rulerY = by
+        local trackAreaY = by + stripH
+        local trackAreaH = math.max(0, bh - stripH)
+
+        -- Wheel zoom inside ruler/tracks
+        if ui.wheelDelta ~= 0 and ui:pointInRect(rulerX, by, rulerW, bh) then
+            local factor = ui.wheelDelta > 0 and 1.15 or 0.87
+            tl.zoom = math.clamp(tl.zoom * factor, 25, 320)
+        end
+
+        -- Ruler scrubbing (click or drag anywhere on ruler)
+        local rulerHot, rulerCap = ui:hitTest("tl_ruler", rulerX, rulerY, rulerW, stripH)
+        if rulerHot then
+            ui:setTooltip("Click or drag to scrub playhead (Mouse wheel to zoom)")
+            if ui.leftPressed then
+                ui:capture("tl_ruler")
+            end
+        end
+        if rulerCap and ui.leftDown then
+            local t = tl.scrollTime + (ui.mx - rulerX - 10) / tl.zoom
+            tl.currentTime = math.clamp(t, 0, tl.duration)
+        end
+
+        ui:pushClip(rulerX, by, rulerW, bh)
+
+        -- Ruler background & ticks
+        Theme.setColor(Theme.C.bgInput)
+        render.drawRectFast(rulerX, rulerY, rulerW, stripH - 1)
+
+        local originPX = rulerX + 10 - tl.scrollTime * tl.zoom
+        local durPX = originPX + tl.duration * tl.zoom
+
+        -- Active sequence span highlight
+        local spanX1 = math.max(rulerX, originPX)
+        local spanX2 = math.min(rulerX + rulerW, durPX)
+        if spanX2 > spanX1 then
+            Theme.setColor(Theme.C.bgPanel, 220)
+            render.drawRectFast(spanX1, trackAreaY, spanX2 - spanX1, trackAreaH)
+        end
+
+        local secStep = tl.zoom < 45 and 2 or 1
+        local subDiv = tl.zoom >= 110 and 4 or 2
+
+        render.setFont(Theme.Fonts.Small)
+        for sec = 0, math.ceil(tl.duration) do
+            local sx = originPX + sec * tl.zoom
+            if sx >= rulerX - 20 and sx <= rulerX + rulerW + 20 then
+                if sec % secStep == 0 then
+                    Theme.setColor(Theme.C.borderLight)
+                    render.drawLine(sx, rulerY + 12, sx, rulerY + stripH - 2)
+                    Theme.setColor(Theme.C.textSecondary)
+                    render.drawSimpleText(sx + 3, rulerY + 4, string.format("%ds", sec), TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+
+                    -- Vertical guide line into track body
+                    Theme.setColor(Theme.C.border, 120)
+                    render.drawLine(sx, trackAreaY, sx, trackAreaY + trackAreaH)
+                else
+                    Theme.setColor(Theme.C.border)
+                    render.drawLine(sx, rulerY + 18, sx, rulerY + stripH - 2)
+                end
+
+                if sec < tl.duration then
+                    for sub = 1, subDiv - 1 do
+                        local subX = sx + (sub / subDiv) * tl.zoom
+                        Theme.setColor(Theme.C.border, 150)
+                        render.drawLine(subX, rulerY + 21, subX, rulerY + stripH - 2)
+                    end
+                end
+            end
+        end
+
+        -- End-of-sequence marker
+        if durPX >= rulerX and durPX <= rulerX + rulerW then
+            Theme.setColor(Theme.C.warning, 160)
+            render.drawLine(durPX, rulerY, durPX, by + bh)
+        end
+
+        -- Playhead scrubber line + handle
+        local playX = math.floor(originPX + tl.currentTime * tl.zoom)
+        if playX >= rulerX and playX <= rulerX + rulerW then
+            Theme.setColor(Theme.C.accent)
+            render.drawLine(playX, rulerY + 4, playX, by + bh)
+            render.drawRectFast(playX - 5, rulerY + 3, 11, 10)
+            Theme.setColor(Theme.C.textPrimary)
+            render.drawRectOutline(playX - 5, rulerY + 3, 11, 10, 1)
+        end
+
+        -- Track rows preview (mirrors current IR nodes)
+        local selId = sceneGraph:getSelectedId()
+        local rows = sceneGraph:getFlatHierarchy("")
+        local rowY = trackAreaY + 4
+        local rowH = 22
+        for _, item in ipairs(rows) do
+            if item.node.id ~= sceneGraph:getRootId() and rowY + rowH <= by + bh - 4 then
+                local isSel = (item.node.id == selId)
+                if isSel then
+                    Theme.setColor(Theme.C.accentSoft, 80)
+                    render.drawRectFast(rulerX, rowY, rulerW, rowH)
+                end
+                Theme.setColor(Theme.C.border, 90)
+                render.drawLine(rulerX, rowY + rowH, rulerX + rulerW, rowY + rowH)
+                rowY = rowY + rowH
+            end
+        end
+
+        if trackAreaH >= 48 then
+            render.setFont(Theme.Fonts.Small)
+            Theme.setColor(Theme.C.textMuted)
+            render.drawSimpleText(
+                rulerX + 12,
+                by + bh - 14,
+                "Keyframe tracks, interpolation & easing curves arrive in Phase 8 (Ruler scrubbing is live).",
+                TEXT_ALIGN.LEFT,
+                TEXT_ALIGN.CENTER
+            )
+        end
+
+        ui:popClip()
+
+        -- Left track label list (clipped to headerColW)
+        ui:pushClip(bx, trackAreaY, headerColW, trackAreaH)
+        local lRowY = trackAreaY + 4
+        for _, item in ipairs(rows) do
+            if item.node.id ~= sceneGraph:getRootId() and lRowY + rowH <= by + bh - 4 then
+                local isSel = (item.node.id == selId)
+                if isSel then
+                    Theme.setColor(Theme.C.bgSelectionRow)
+                    render.drawRectFast(bx + 2, lRowY, headerColW - 4, rowH)
+                end
+                render.setFont(Theme.Fonts.Body)
+                Theme.setColor(isSel and Theme.C.textPrimary or Theme.C.textSecondary)
+                render.drawSimpleText(bx + 10, lRowY + rowH * 0.5, item.node.name, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+                render.setFont(Theme.Fonts.Small)
+                Theme.setColor(Theme.C.textMuted)
+                render.drawSimpleText(bx + headerColW - 8, lRowY + rowH * 0.5, "No tracks (P8)", TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+
+                Theme.setColor(Theme.C.border, 90)
+                render.drawLine(bx, lRowY + rowH, bx + headerColW, lRowY + rowH)
+                lRowY = lRowY + rowH
+            end
+        end
+        ui:popClip()
+
+        ui:popClip()
+    end
+
+    SOLACE.Timeline = Timeline
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 16: Animation system (Phase 8)
+-- ============================================================================
+(function(SOLACE)
+    -- Reserved for Phase 8: Keyframe Track Evaluation, Interpolation & Easing Curves.
+    local Animation = {
+        ready = false,
+        phase = 8,
+    }
+
+    SOLACE.Animation = Animation
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 17: Asset browser
+-- ============================================================================
+(function(SOLACE)
+    local Constants = SOLACE.Constants
+    local Utils = SOLACE.Utils
+    local Theme = SOLACE.Theme
+    local Widgets = SOLACE.Widgets
+
+
+
+    local Toolbox = {
+        _scrollY = 0,
+        _contentH = 0,
+    }
+
+    function Toolbox.draw(ui, state, rect, actions)
+        if rect.w <= 0 or rect.h <= 0 then return end
+
+        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Toolbox", "Create")
+        if bw < 20 or bh < 40 then return end
+
+        -- Scroll body with wheel when mouse inside Toolbox
+        if ui.wheelDelta ~= 0 and ui:pointInRect(bx, by, bw, bh) then
+            Toolbox._scrollY = Toolbox._scrollY - ui.wheelDelta * 26
+        end
+        local maxScroll = math.max(0, Toolbox._contentH - bh)
+        Toolbox._scrollY = math.clamp(Toolbox._scrollY, 0, maxScroll)
+
+        ui:pushClip(bx, by, bw, bh)
+
+        local pad = Theme.Metrics.pad
+        local innerW = bw - pad * 2 - (maxScroll > 0 and 6 or 0)
+        local curY = by + pad - Toolbox._scrollY
+        local startY = curY
+
+        -- Search input
+        Widgets.textBox(
+            ui,
+            "toolbox_search",
+            bx + pad,
+            curY,
+            innerW,
+            24,
+            function() return state.toolboxSearch end,
+            function(v) state.toolboxSearch = v end,
+            "Filter assets...",
+            "Filter available models and sprites"
+        )
+        curY = curY + 30
+
+        -- Category buttons (2 columns)
+        local cols = innerW >= 200 and 2 or 1
+        local gap = 4
+        local cellW = math.floor((innerW - gap * (cols - 1)) / cols)
+        local cellH = 24
+        local activeCatInfo = Constants.ASSET_CATEGORIES[1]
+
+        for i, cat in ipairs(Constants.ASSET_CATEGORIES) do
+            local col = (i - 1) % cols
+            local row = math.floor((i - 1) / cols)
+            local cx = bx + pad + col * (cellW + gap)
+            local cy = curY + row * (cellH + gap)
+            local isSelected = (state.activeToolboxCategory == cat.id)
+            if isSelected then activeCatInfo = cat end
+
+            if Widgets.button(ui, "tbx_cat_" .. cat.id, cx, cy, cellW, cellH, cat.label, {
+                icon = cat.icon,
+                active = isSelected,
+                tooltip = cat.desc,
+            }) then
+                state.activeToolboxCategory = cat.id
+                Toolbox._scrollY = 0
+            end
+        end
+
+        local rows = math.ceil(#Constants.ASSET_CATEGORIES / cols)
+        curY = curY + rows * (cellH + gap) + 8
+
+        -- Hierarchy containers quick create
+        local halfW = math.floor((innerW - 4) * 0.5)
+        if Widgets.button(ui, "tbx_new_group", bx + pad, curY, halfW, 22, "+ Group", {
+            icon = "layers",
+            tooltip = "Create a Group node in the Scene Hierarchy",
+        }) then
+            actions.spawnGroup()
+        end
+        if Widgets.button(ui, "tbx_new_folder", bx + pad + halfW + 4, curY, innerW - halfW - 4, 22, "+ Folder", {
+            icon = "layers",
+            tooltip = "Create a Folder node in the Scene Hierarchy",
+        }) then
+            actions.spawnFolder()
+        end
+        curY = curY + 28
+
+        Theme.setColor(Theme.C.border)
+        render.drawLine(bx + pad, curY, bx + pad + innerW, curY)
+        curY = curY + 8
+
+        local q = string.lower(string.trim(state.toolboxSearch or ""))
+
+        if state.activeToolboxCategory == "models" then
+            -- Custom mounted .mdl path spawner
+            render.setFont(Theme.Fonts.Small)
+            Theme.setColor(Theme.C.textSecondary)
+            render.drawSimpleText(bx + pad, curY, "Custom Mounted Model (.mdl)", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            curY = curY + 15
+
+            Widgets.textBox(
+                ui,
+                "tbx_custom_mdl",
+                bx + pad,
+                curY,
+                innerW,
+                24,
+                function() return state.customModelPath end,
+                function(v) state.customModelPath = v end,
+                "models/...",
+                "Enter any mounted GMod model path (e.g. models/props_c17/oildrum001.mdl)"
+            )
+            curY = curY + 28
+
+            local customOk = Utils.checkModelMounted(state.customModelPath)
+            local spawnLabel = customOk and "Spawn Custom Model" or "Model Path Not Found"
+            if Widgets.button(ui, "tbx_spawn_custom", bx + pad, curY, innerW, 24, spawnLabel, {
+                icon = "cube",
+                disabled = not customOk,
+                tooltip = customOk and ("Spawn " .. state.customModelPath .. " in front of camera") or "Verify path starts with models/ and exists in GMod",
+            }) then
+                local fname = string.getFileFromFilename(state.customModelPath) or "Model"
+                local cleanName = string.stripExtension(fname)
+                actions.spawnQuickModel(cleanName ~= "" and cleanName or "Model", state.customModelPath)
+            end
+            curY = curY + 32
+
+            render.setFont(Theme.Fonts.Small)
+            Theme.setColor(Theme.C.textSecondary)
+            render.drawSimpleText(bx + pad, curY, "Starter Models (Click to Spawn)", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            curY = curY + 16
+
+            local shown = 0
+            for idx, item in ipairs(Constants.STARTER_MODELS) do
+                local matches = (q == "")
+                    or string.find(string.lower(item.name), q, 1, true) ~= nil
+                    or string.find(string.lower(item.model), q, 1, true) ~= nil
+                if matches then
+                    local mounted = Utils.checkModelMounted(item.model)
+                    if mounted then
+                        shown = shown + 1
+                        if Widgets.button(ui, "tbx_mdl_" .. idx, bx + pad, curY, innerW, 24, item.name, {
+                            icon = "cube",
+                            subtle = true,
+                            tooltip = "Spawn " .. item.model .. " in front of Freecam",
+                        }) then
+                            actions.spawnQuickModel(item.name, item.model)
+                        end
+                        curY = curY + 26
+                    end
+                end
+            end
+            if shown == 0 then
+                render.setFont(Theme.Fonts.Small)
+                Theme.setColor(Theme.C.textMuted)
+                render.drawSimpleText(bx + pad, curY, "No starter models match filter.", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+                curY = curY + 20
+            end
+
+            curY = curY + 6
+            local nh = Widgets.phaseNotice(
+                bx + pad, curY, innerW,
+                "Full Asset Scanner",
+                { "Auto-indexing all GMod/addon", "models arrives in Phase 6." },
+                "Phase 6"
+            )
+            curY = curY + nh + 8
+
+        elseif state.activeToolboxCategory == "sprites" then
+            render.setFont(Theme.Fonts.Small)
+            Theme.setColor(Theme.C.textSecondary)
+            render.drawSimpleText(bx + pad, curY, "Starter Sprites (Click to Spawn)", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            curY = curY + 16
+
+            for idx, item in ipairs(Constants.STARTER_SPRITES) do
+                if q == "" or string.find(string.lower(item.name), q, 1, true) ~= nil then
+                    if Widgets.button(ui, "tbx_spr_" .. idx, bx + pad, curY, innerW, 24, item.name, {
+                        icon = "sparkle",
+                        subtle = true,
+                        tooltip = "Spawn 3D Sprite (" .. item.material .. ")",
+                    }) then
+                        actions.spawnSprite(item.name, item.material)
+                    end
+                    curY = curY + 26
+                end
+            end
+
+            curY = curY + 6
+            local nh = Widgets.phaseNotice(
+                bx + pad, curY, innerW,
+                "Dedicated Sprite Editor",
+                { "Size/fade/lifetime curves & material", "browser arrive in Phase 7." },
+                "Phase 7"
+            )
+            curY = curY + nh + 8
+        else
+            local nh = Widgets.phaseNotice(
+                bx + pad,
+                curY,
+                innerW,
+                activeCatInfo.label,
+                {
+                    activeCatInfo.desc,
+                    "",
+                    "Use the Models or Sprites tabs above",
+                    "to spawn objects in Phase 2.",
+                },
+                "Upcoming"
+            )
+            curY = curY + nh + 8
+        end
+
+        Toolbox._contentH = (curY - startY) + pad
+
+        if maxScroll > 0 then
+            local barW = 4
+            local barX = bx + bw - barW - 2
+            local trackH = bh - 4
+            local thumbH = math.max(24, math.floor(trackH * (bh / Toolbox._contentH)))
+            local thumbY = by + 2 + math.floor((trackH - thumbH) * (Toolbox._scrollY / maxScroll))
+            Theme.setColor(Theme.C.bgInput)
+            render.drawRectFast(barX, by + 2, barW, trackH)
+            Theme.setColor(Theme.C.borderLight)
+            render.drawRectFast(barX, thumbY, barW, thumbH)
+        end
+
+        ui:popClip()
+    end
+
+    SOLACE.Toolbox = Toolbox
+
+    -- Reserved for Phase 6: Incremental file.findInGame mounted asset scanner
+    SOLACE.AssetScanner = { ready = false, phase = 6 }
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 18: Project serialization (Phase 12)
+-- ============================================================================
+(function(SOLACE)
+    -- Reserved for Phase 12: JSON Project Save/Load & Reusable Presets in sf_filedata/solace/.
+    local ProjectStorage = {
+        ready = false,
+        phase = 12,
+    }
+
+    SOLACE.ProjectStorage = ProjectStorage
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 19: StarfallEx Lua exporter (Phase 13)
+-- ============================================================================
+(function(SOLACE)
+    -- Reserved for Phase 13: AI-Friendly IR & Clean StarfallEx Lua Code Exporter.
+    local LuaExporter = {
+        ready = false,
+        phase = 13,
+    }
+
+    SOLACE.LuaExporter = LuaExporter
+end)(SOLACE)
+
+-- ============================================================================
+-- SECTION 20: Main execution loop
+-- ============================================================================
+(function(SOLACE)
+    local Constants    = SOLACE.Constants
+    local Events       = SOLACE.Events
+    local Commands     = SOLACE.Commands
+    local SceneGraph   = SOLACE.SceneGraph
+    local SceneRuntime = SOLACE.SceneRuntime
+    local Theme        = SOLACE.Theme
+    local UIManager    = SOLACE.UIManager
+    local Layout       = SOLACE.Layout
+    local ViewportGrid = SOLACE.ViewportGrid
+    local Freecam      = SOLACE.Freecam
+    local Selection    = SOLACE.Selection
+    local Toolbar      = SOLACE.Toolbar
+    local Toolbox      = SOLACE.Toolbox
+    local Explorer     = SOLACE.Explorer
+    local Properties   = SOLACE.Properties
+    local Timeline     = SOLACE.Timeline
+
+
+
+
+    Theme.initFonts()
+
+    local events     = Events.new()
+    local commands   = Commands.new(events, 100)
+    local sceneGraph = SceneGraph.new(events)
+    local runtime    = SceneRuntime.new(sceneGraph, events)
+    local state      = Constants.createDefaultState()
+    local ui         = UIManager.new(state)
+    local layout     = Layout.new(state)
+    local camera     = Freecam.new(state)
+
+    local hudConnected = false
+    local lastFrameTime = timer.realtime()
+    local fpsSmooth = 60
+
+    local HIDDEN_HUD_ELEMENTS = {
+        CHudHealth = true,
+        CHudBattery = true,
+        CHudAmmo = true,
+        CHudSecondaryAmmo = true,
+        CHudCrosshair = true,
+        CHudWeaponSelection = true,
+        CHudDamageIndicator = true,
+        CHudSuitPower = true,
+        CHudHintDisplay = true,
+        CHudZoom = true,
+        CHudPoisonDamageIndicator = true,
+        CHudSquadStatus = true,
+    }
+
+    local function syncCursor()
+        if not hasPermission("input.enablecursor") then return end
+        local wantCursor = hudConnected and state.studioOpen and (not state.viewportLooking)
+        if input.getCursorVisible() ~= wantCursor then
+            input.enableCursor(wantCursor)
+        end
+    end
+
+    local function setStudioOpen(open)
+        state.studioOpen = open
+        if not open then
+            state.viewportLooking = false
+            ui.focusedInputId = nil
+            ui.activeId = nil
+        elseif not camera.initialized then
+            camera:initFromPlayer()
+        end
+        syncCursor()
+    end
+
+    local function resolveOrigin()
+        ViewportGrid.resolveOrigin(state)
+        sceneGraph:setOrigin(state.grid.originPos)
+    end
+
+    local function getTargetContainerParentId()
+        local sel = sceneGraph:getSelectedNode()
+        if sel and (sel.kind == Constants.NODE_KINDS.GROUP or sel.kind == Constants.NODE_KINDS.FOLDER) then
+            return sel.id
+        end
+        return sceneGraph:getRootId()
+    end
+
+    local actions = {}
+    actions.hasSelection = false
+
+    function actions.toggleStudio(open)
+        setStudioOpen(open)
+    end
+
+    function actions.resolveOrigin()
+        resolveOrigin()
+    end
+
+    function actions.focusSelected()
+        camera:focusNode(sceneGraph, runtime)
+    end
+
+    function actions.spawnQuickModel(name, modelPath)
+        local posTbl, angTbl = camera:getSpawnTransform(state.spawnDistance)
+        local parentId = getTargetContainerParentId()
+        local node = sceneGraph:createModel(name, modelPath, posTbl, angTbl, parentId)
+        sceneGraph:setSelectedId(node.id)
+    end
+
+    function actions.spawnSprite(name, matPath)
+        local posTbl = camera:getSpawnTransform(state.spawnDistance)
+        local parentId = getTargetContainerParentId()
+        local node = sceneGraph:createSprite(name, matPath, posTbl, parentId)
+        sceneGraph:setSelectedId(node.id)
+    end
+
+    function actions.spawnGroup()
+        local posTbl = camera:getSpawnTransform(state.spawnDistance)
+        local parentId = getTargetContainerParentId()
+        local node = sceneGraph:createGroup("Group", posTbl, parentId)
+        sceneGraph:setSelectedId(node.id)
+    end
+
+    function actions.spawnFolder()
+        local parentId = getTargetContainerParentId()
+        local node = sceneGraph:createFolder("Folder", parentId)
+        sceneGraph:setSelectedId(node.id)
+    end
+
+    function actions.deleteSelected()
+        local ids = {}
+        for _, id in ipairs(sceneGraph:getSelectedIds()) do
+            if id ~= sceneGraph:getRootId() then
+                ids[#ids + 1] = id
+            end
+        end
+        for _, id in ipairs(ids) do
+            sceneGraph:removeNode(id)
+        end
+    end
+
+    timer.simple(0.05, function()
+        resolveOrigin()
+        camera:initFromPlayer()
+        if hasPermission("render.hud") then
+            hudConnected = true
+            syncCursor()
+        end
+    end)
+
+    hook.add("HUDConnected", "solace_hud_connected", function(ent, ply)
+        if ply == player() then
+            hudConnected = true
+            if not camera.initialized then
+                camera:initFromPlayer()
+            end
+            syncCursor()
+        end
+    end)
+
+    hook.add("HUDDisconnected", "solace_hud_disconnected", function(ent, ply)
+        if ply == player() then
+            hudConnected = false
+            state.viewportLooking = false
+            ui.focusedInputId = nil
+            ui.activeId = nil
+            if hasPermission("input.enablecursor") then
+                input.enableCursor(false)
+            end
+        end
+    end)
+
+    hook.add("HUDShouldDraw", "solace_hide_game_hud", function(name)
+        if state.studioOpen and HIDDEN_HUD_ELEMENTS[name] then
+            return false
+        end
+    end)
+
+    hook.add("CalcView", "solace_freecam_view", function(origin, angles, fov, znear, zfar)
+        if not state.studioOpen or not hudConnected then return end
+        if not hasPermission("render.calcview") then return end
+        return camera:calcView(origin, angles, fov, znear, zfar)
+    end)
+
+    hook.add("MouseMoved", "solace_freecam_look", function(dx, dy)
+        if state.studioOpen and state.viewportLooking then
+            camera:onMouseMoved(dx, dy)
+        end
+    end)
+
+    hook.add("Think", "solace_runtime_flush", function()
+        runtime:flush()
+    end)
+
+    hook.add("Removed", "solace_cleanup", function()
+        runtime:cleanup()
+        if hasPermission("input.enablecursor") then
+            input.enableCursor(false)
+        end
+    end)
+
+    hook.add("InputPressed", "solace_input_pressed", function(key)
+        if key == KEY.F6 then
+            setStudioOpen(not state.studioOpen)
+            return
+        end
+
+        if not state.studioOpen then return end
+
+        if ui:handleKeyPressed(key) then
+            return
+        end
+
+        if key == KEY.G then
+            state.grid.enabled = not state.grid.enabled
+        elseif key == KEY.Q then
+            state.activeTool = "select"
+        elseif key == KEY.F then
+            actions.focusSelected()
+        elseif key == KEY.DELETE then
+            actions.deleteSelected()
+        elseif key == KEY.ESCAPE then
+            sceneGraph:clearSelection()
+        end
+    end)
+
+    hook.add("InputBindPressed", "solace_block_binds", function(bind)
+        if ui:shouldBlockBind(bind) then
+            return true
+        end
+    end)
+
+    hook.add("MouseWheeled", "solace_mouse_wheel", function(delta)
+        if not state.studioOpen then return end
+        if state.viewportLooking then
+            camera:onMouseWheelInViewport(delta)
+        else
+            ui:onMouseWheeled(delta)
+        end
+    end)
+
+    hook.add("PostDrawOpaqueRenderables", "solace_viewport_3d", function(depth, skybox, skybox3d)
+        if skybox or skybox3d then return end
+        if not state.studioOpen then return end
+        ViewportGrid.draw3D(state)
+        Selection.draw3D(state, camera, sceneGraph, runtime)
+    end)
+
+    hook.add("PostDrawTranslucentRenderables", "solace_viewport_sprites", function(depth, skybox, skybox3d)
+        if skybox or skybox3d then return end
+        if not state.studioOpen then return end
+        runtime:drawSprites(state)
+    end)
+
+    hook.add("HUDPaint", "solace_hud_paint", function()
+        if not hasPermission("render.hud") then return end
+        hudConnected = true
+
+        local now = timer.realtime()
+        local dt = math.clamp(now - lastFrameTime, 0.0001, 0.25)
+        lastFrameTime = now
+        local instFps = 1 / dt
+        fpsSmooth = fpsSmooth * 0.92 + instFps * 0.08
+
+        if not state.studioOpen then
+            local scrW = render.getResolution()
+            local label = "SOLACE Minimized  |  Press F6 to Open"
+            render.setFont(Theme.Fonts.Small)
+            local tw = render.getTextSize(label)
+            local pw = tw + 18
+            local px = scrW - pw - 14
+            local py = 14
+            Theme.setColor(Theme.C.hudPill)
+            render.drawRectFast(px, py, pw, 24)
+            Theme.setColor(Theme.C.borderLight)
+            render.drawRectOutline(px, py, pw, 24, 1)
+            Theme.setColor(Theme.C.textPrimary)
+            render.drawSimpleText(px + 9, py + 12, label, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+            return
+        end
+
+        syncCursor()
+        ui:beginFrame(dt)
+        layout:compute(ui.scrW, ui.scrH)
+
+        local rects = layout.rects
+        ViewportGrid.updateLookMode(state, ui, rects.viewport)
+        camera:update(dt, ui, rects.viewport)
+
+        local sel = sceneGraph:getSelectedNode()
+        actions.hasSelection = (sel ~= nil and sel.id ~= sceneGraph:getRootId())
+
+        -- Draw docked studio panels around the live center 3D viewport cutout
+        Toolbar.draw(ui, state, layout, rects.toolbar, actions)
+        Toolbox.draw(ui, state, rects.toolbox, actions)
+        Explorer.draw(ui, state, sceneGraph, rects.explorer, actions)
+        Properties.draw(ui, state, sceneGraph, runtime, camera, rects.properties, actions)
+        Timeline.draw(ui, state, sceneGraph, rects.timeline)
+
+        -- Draw viewport frame, 3D orientation triad & telemetry
+        ViewportGrid.drawOverlay(state, ui, rects.viewport, fpsSmooth, camera, sceneGraph)
+
+        -- Draw interactive panel splitters on top of panel borders
+        layout:updateAndDrawSplitters(ui)
+
+        -- Viewport raycast hover & click selection (only when no UI widget/splitter is hovered/active)
+        if ui.hotId == nil and ui.activeId == nil then
+            Selection.pickAtCursor(ui, state, camera, sceneGraph, runtime, rects.viewport)
+            Selection.handleClick(ui, state, camera, sceneGraph, runtime, rects.viewport)
+        else
+            Selection.hoveredId = nil
+        end
+
+        -- Permission warning banner if cursor/input/calcview permissions were restricted
+        if not hasPermission("input.enablecursor") or not hasPermission("input") or not hasPermission("render.calcview") then
+            local msg = "SOLACE needs Cursor/Input/CalcView permissions: Press E (Use) on the Starfall chip to grant."
+            render.setFont(Theme.Fonts.BodyBold)
+            local mw = render.getTextSize(msg) + 24
+            local mx = math.floor((ui.scrW - mw) * 0.5)
+            local my = rects.toolbar.h + 12
+            Theme.setColor(Theme.C.danger, 225)
+            render.drawRectFast(mx, my, mw, 28)
+            Theme.setColor(Theme.C.textPrimary)
+            render.drawSimpleText(mx + mw * 0.5, my + 14, msg, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+        end
+
+        ui:drawTooltip()
+        ui:endFrame(dt)
+    end)
+end)(SOLACE)
+
