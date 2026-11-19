@@ -67,7 +67,7 @@ setupPermissionRequest({
 -- ============================================================================
 -- SECTION 2: Constants and configuration
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
 
     local Constants = {}
 
@@ -255,12 +255,12 @@ setupPermissionRequest({
 
 
     SOLACE.Constants = Constants
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 3: Core utilities
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     local Utils = {}
     local _modelExistsCache = {}
 
@@ -304,12 +304,12 @@ end)(SOLACE)
     end
 
     SOLACE.Utils = Utils
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 4: Event system
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
 
     local Events = {}
     Events.__index = Events
@@ -346,12 +346,12 @@ end)(SOLACE)
 
 
     SOLACE.Events = Events
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 5: Command and undo/redo system
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
 
     local Commands = {}
     Commands.__index = Commands
@@ -438,12 +438,12 @@ end)(SOLACE)
 
 
     SOLACE.Commands = Commands
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 6: Scene IR
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     local Constants = SOLACE.Constants
 
 
@@ -642,12 +642,12 @@ end)(SOLACE)
 
 
     SOLACE.IR = IR
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 7: Scene graph
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     local Constants = SOLACE.Constants
     local Utils = SOLACE.Utils
     local IR = SOLACE.IR
@@ -1025,12 +1025,12 @@ end)(SOLACE)
 
 
     SOLACE.SceneGraph = SceneGraph
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 8: Runtime rendering adapter
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     local Constants = SOLACE.Constants
     local IR = SOLACE.IR
 
@@ -1320,12 +1320,12 @@ end)(SOLACE)
 
 
     SOLACE.SceneRuntime = SceneRuntime
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 9: Math and transformations
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
 
     local Math3D = {}
 
@@ -1436,12 +1436,12 @@ end)(SOLACE)
 
 
     SOLACE.Math3D = Math3D
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 10: Freecam
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     local Constants = SOLACE.Constants
     local Math3D = SOLACE.Math3D
 
@@ -1591,12 +1591,12 @@ end)(SOLACE)
 
 
     SOLACE.Freecam = Freecam
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 11: Object selection
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     local Constants = SOLACE.Constants
 
 
@@ -1765,12 +1765,12 @@ end)(SOLACE)
 
 
     SOLACE.Selection = Selection
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 12: Transform gizmos (Phase 3)
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     -- Reserved for Phase 3: Interactive 3D Move, Rotate, Scale & Pivot Gizmos.
     local Gizmos = {
         ready = false,
@@ -1778,12 +1778,12 @@ end)(SOLACE)
     }
 
     SOLACE.Gizmos = Gizmos
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 13: UI framework
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     local Constants = SOLACE.Constants
 
     -- 13.1 Theme & Typography
@@ -2797,12 +2797,12 @@ end)(SOLACE)
     end
 
     SOLACE.Layout = Layout
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 14: UI panels
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     local Constants = SOLACE.Constants
     local Utils = SOLACE.Utils
     local Theme = SOLACE.Theme
@@ -3711,12 +3711,12 @@ end)(SOLACE)
     end
 
     SOLACE.Properties = Properties
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 15: Timeline
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     local Constants = SOLACE.Constants
     local Utils = SOLACE.Utils
     local Theme = SOLACE.Theme
@@ -3963,12 +3963,12 @@ end)(SOLACE)
     end
 
     SOLACE.Timeline = Timeline
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 16: Animation system (Phase 8)
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     -- Reserved for Phase 8: Keyframe Track Evaluation, Interpolation & Easing Curves.
     local Animation = {
         ready = false,
@@ -3976,12 +3976,12 @@ end)(SOLACE)
     }
 
     SOLACE.Animation = Animation
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 17: Asset browser
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     local Constants = SOLACE.Constants
     local Utils = SOLACE.Utils
     local Theme = SOLACE.Theme
@@ -4219,12 +4219,12 @@ end)(SOLACE)
 
     -- Reserved for Phase 6: Incremental file.findInGame mounted asset scanner
     SOLACE.AssetScanner = { ready = false, phase = 6 }
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 18: Project serialization (Phase 12)
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     -- Reserved for Phase 12: JSON Project Save/Load & Reusable Presets in sf_filedata/solace/.
     local ProjectStorage = {
         ready = false,
@@ -4232,12 +4232,12 @@ end)(SOLACE)
     }
 
     SOLACE.ProjectStorage = ProjectStorage
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 19: StarfallEx Lua exporter (Phase 13)
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     -- Reserved for Phase 13: AI-Friendly IR & Clean StarfallEx Lua Code Exporter.
     local LuaExporter = {
         ready = false,
@@ -4245,12 +4245,12 @@ end)(SOLACE)
     }
 
     SOLACE.LuaExporter = LuaExporter
-end)(SOLACE)
+end)(SOLACE) end
 
 -- ============================================================================
 -- SECTION 20: Main execution loop
 -- ============================================================================
-(function(SOLACE)
+do (function(SOLACE)
     local Constants    = SOLACE.Constants
     local Events       = SOLACE.Events
     local Commands     = SOLACE.Commands
@@ -4576,5 +4576,5 @@ end)(SOLACE)
         ui:drawTooltip()
         ui:endFrame(dt)
     end)
-end)(SOLACE)
+end)(SOLACE) end
 
