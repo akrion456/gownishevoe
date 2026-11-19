@@ -29,30 +29,37 @@ local SOLACE = {}
 -- ============================================================================
 if SERVER then
     -- Singleplayer / Sandbox-first: automatically attach owner HUD on spawn/use
-    local function attachOwnerHud(ply)
+    local function attachOwnerHud(ply, reason)
         if isValid(ply) and ply == owner() then
-            pcall(enableHud, ply, true)
+            local ok, err = pcall(enableHud, ply, true)
+            printConsole(string.format("[SOLACE SV] enableHud(%s): ok=%s%s", tostring(reason or "auto"), tostring(ok), ok and "" or (" err=" .. tostring(err))))
+            return ok, err
         end
+        return false, "not owner"
     end
 
     hook.add("ClientInitialized", "solace_sv_init_hud", function(ply)
-        attachOwnerHud(ply)
+        attachOwnerHud(ply, "ClientInitialized")
     end)
 
     hook.add("StarfallUsed", "solace_sv_used_hud", function(activator, used)
         if used == chip() then
-            attachOwnerHud(activator)
+            local ok, err = attachOwnerHud(activator, "StarfallUsed")
+            if isValid(activator) and activator == owner() then
+                print("[SOLACE SV] Chip used -> HUD attach=" .. tostring(ok) .. (ok and "" or (" (" .. tostring(err) .. ")")))
+            end
         end
     end)
 
     timer.simple(0.1, function()
-        attachOwnerHud(owner())
+        local ok, err = attachOwnerHud(owner(), "startup")
+        print("[SOLACE SV] Ready (HUD attach=" .. tostring(ok) .. (ok and "" or (" err=" .. tostring(err))) .. ")")
     end)
 
     return
 end
 
-local permOk = pcall(setupPermissionRequest, {
+local permOk, permErr = pcall(setupPermissionRequest, {
     "render.hud",
     "render.calcview",
     "hologram.create",
@@ -65,12 +72,15 @@ local permOk = pcall(setupPermissionRequest, {
 }, "SOLACE Studio requires HUD rendering, Freecam view control, cursor input, clientside holograms, and asset access.", true)
 
 if not permOk then
-    pcall(setupPermissionRequest, {
+    local fallbackOk, fallbackErr = pcall(setupPermissionRequest, {
         "render.hud",
         "render.calcview",
         "input",
         "input.enablecursor",
     }, "SOLACE Studio requires HUD rendering, Freecam view control, and cursor input.", true)
+    printConsole("[SOLACE CL] Full setupPermissionRequest failed (" .. tostring(permErr) .. "), fallback=" .. tostring(fallbackOk) .. (fallbackOk and "" or (" " .. tostring(fallbackErr))))
+else
+    printConsole("[SOLACE CL] Permission request registered.")
 end
 
 -- ============================================================================
@@ -4324,12 +4334,28 @@ do (function(SOLACE)
 
     local f6Down = false
     local drawErrorLogged = false
+    local firstDrawLogged = false
 
     local function isHudActiveSafe()
         if type(render.isHUDActive) == "function" then
             return render.isHUDActive()
         end
         return hasPermission("render.hud")
+    end
+
+    local function formatDiagState(prefix)
+        return string.format(
+            "%s | studioOpen=%s | hudActive=%s | hudConn=%s | perms(hud=%s, calcview=%s, cursor=%s, input=%s, holo=%s)",
+            prefix,
+            tostring(state.studioOpen),
+            tostring(isHudActiveSafe()),
+            tostring(hudConnected),
+            tostring(hasPermission("render.hud")),
+            tostring(hasPermission("render.calcview")),
+            tostring(hasPermission("input.enablecursor")),
+            tostring(hasPermission("input")),
+            tostring(hasPermission("hologram.create"))
+        )
     end
 
     local function syncCursor()
@@ -4367,6 +4393,7 @@ do (function(SOLACE)
             print("[SOLACE] HUD not connected yet — press E (Use) on the Starfall chip or link a Starfall HUD component.")
         end
         setStudioOpen(nextOpen)
+        printConsole(formatDiagState(nextOpen and "[SOLACE] Studio opened (F6)" or "[SOLACE] Studio minimized (F6)"))
     end
 
     local function resolveOrigin()
@@ -4436,6 +4463,10 @@ do (function(SOLACE)
         end
     end
 
+    local startupMsg = formatDiagState("[SOLACE CL] Loaded")
+    print(startupMsg)
+    printConsole(startupMsg)
+
     timer.simple(0.05, function()
         resolveOrigin()
         camera:initFromPlayer()
@@ -4446,12 +4477,27 @@ do (function(SOLACE)
             hudConnected = true
             syncCursor()
         end
+        printConsole(formatDiagState("[SOLACE CL] Post-init"))
     end)
 
     timer.simple(0.35, function()
         if not isHudActiveSafe() and not hudConnected then
             print("[SOLACE] Waiting for HUD connection — press E (Use) on the Starfall chip or link a Starfall HUD component, then press F6.")
         end
+    end)
+
+    hook.add("StarfallUsed", "solace_cl_used", function(activator, used)
+        if used ~= chip() or activator ~= player() then return end
+        if not isHudActiveSafe() and hasPermission("enablehud") then
+            pcall(enableHud, nil, true)
+        end
+        if isHudActiveSafe() then
+            hudConnected = true
+        end
+        setStudioOpen(true)
+        local msg = formatDiagState("[SOLACE CL] Chip used (E)")
+        print(msg)
+        printConsole(msg)
     end)
 
     hook.add("HUDConnected", "solace_hud_connected", function(ent, ply)
@@ -4461,6 +4507,7 @@ do (function(SOLACE)
                 camera:initFromPlayer()
             end
             syncCursor()
+            printConsole(formatDiagState("[SOLACE CL] HUDConnected"))
         end
     end)
 
@@ -4586,6 +4633,12 @@ do (function(SOLACE)
         local instFps = 1 / dt
         fpsSmooth = fpsSmooth * 0.92 + instFps * 0.08
 
+        if not firstDrawLogged then
+            firstDrawLogged = true
+            local sw, sh = render.getResolution()
+            printConsole(string.format("[SOLACE CL] DrawHUD active (%dx%d, studioOpen=%s)", sw or 0, sh or 0, tostring(state.studioOpen)))
+        end
+
         if not state.studioOpen then
             local scrW = render.getResolution()
             local label = "SOLACE Minimized  |  Press F6 to Open"
@@ -4603,18 +4656,18 @@ do (function(SOLACE)
             return
         end
 
-        syncCursor()
-        ui:beginFrame(dt)
-        layout:compute(ui.scrW, ui.scrH)
-
-        local rects = layout.rects
-        ViewportGrid.updateLookMode(state, ui, rects.viewport)
-        camera:update(dt, ui, rects.viewport)
-
-        local sel = sceneGraph:getSelectedNode()
-        actions.hasSelection = (sel ~= nil and sel.id ~= sceneGraph:getRootId())
-
         local ok, err = pcall(function()
+            syncCursor()
+            ui:beginFrame(dt)
+            layout:compute(ui.scrW, ui.scrH)
+
+            local rects = layout.rects
+            ViewportGrid.updateLookMode(state, ui, rects.viewport)
+            camera:update(dt, ui, rects.viewport)
+
+            local sel = sceneGraph:getSelectedNode()
+            actions.hasSelection = (sel ~= nil and sel.id ~= sceneGraph:getRootId())
+
             -- Draw docked studio panels around the live center 3D viewport cutout
             Toolbar.draw(ui, state, layout, rects.toolbar, actions)
             Toolbox.draw(ui, state, rects.toolbox, actions)
@@ -4644,21 +4697,25 @@ do (function(SOLACE)
             if not drawErrorLogged then
                 drawErrorLogged = true
                 print("[SOLACE] DrawHUD error: " .. tostring(err))
+                printConsole("[SOLACE] DrawHUD error: " .. tostring(err))
             end
+            local sw = ui.scrW or render.getResolution()
             render.setFont(Theme.Fonts.BodyBold)
             Theme.setColor(Theme.C.danger, 230)
-            render.drawRectFast(12, 12, math.min(ui.scrW - 24, 720), 34)
+            render.drawRectFast(12, 12, math.min(sw - 24, 720), 34)
             Theme.setColor(Theme.C.textPrimary)
             render.drawSimpleText(22, 29, "SOLACE Render Error: " .. tostring(err), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
         end
 
         -- Permission warning banner if cursor/input/calcview permissions were restricted
         if not hasPermission("input.enablecursor") or not hasPermission("input") or not hasPermission("render.calcview") then
+            local rects = layout.rects
+            local sw = ui.scrW or render.getResolution()
             local msg = "SOLACE needs Cursor/Input/CalcView permissions: Press E (Use) on the Starfall chip to grant."
             render.setFont(Theme.Fonts.BodyBold)
             local mw = render.getTextSize(msg) + 24
-            local mx = math.floor((ui.scrW - mw) * 0.5)
-            local my = rects.toolbar.h + 12
+            local mx = math.floor((sw - mw) * 0.5)
+            local my = (rects and rects.toolbar and rects.toolbar.h or 36) + 12
             Theme.setColor(Theme.C.danger, 225)
             render.drawRectFast(mx, my, mw, 28)
             Theme.setColor(Theme.C.textPrimary)
