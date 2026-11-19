@@ -4301,6 +4301,8 @@ do (function(SOLACE)
         CHudSquadStatus = true,
     }
 
+    local f6Down = false
+
     local function syncCursor()
         if not hasPermission("input.enablecursor") then return end
         local wantCursor = hudConnected and state.studioOpen and (not state.viewportLooking)
@@ -4319,6 +4321,17 @@ do (function(SOLACE)
             camera:initFromPlayer()
         end
         syncCursor()
+    end
+
+    local function toggleStudio()
+        local nextOpen = not state.studioOpen
+        if nextOpen and not render.isHUDActive() and player() == owner() and hasPermission("enablehud") then
+            pcall(enableHud, nil, true)
+        end
+        if render.isHUDActive() then
+            hudConnected = true
+        end
+        setStudioOpen(nextOpen)
     end
 
     local function resolveOrigin()
@@ -4391,7 +4404,10 @@ do (function(SOLACE)
     timer.simple(0.05, function()
         resolveOrigin()
         camera:initFromPlayer()
-        if hasPermission("render.hud") then
+        if not render.isHUDActive() and player() == owner() and hasPermission("enablehud") then
+            pcall(enableHud, nil, true)
+        end
+        if render.isHUDActive() or hasPermission("render.hud") then
             hudConnected = true
             syncCursor()
         end
@@ -4439,6 +4455,15 @@ do (function(SOLACE)
 
     hook.add("Think", "solace_runtime_flush", function()
         runtime:flush()
+        if hasPermission("input") then
+            local isF6 = input.isKeyDown(KEY.F6)
+            if isF6 and not f6Down then
+                f6Down = true
+                toggleStudio()
+            elseif not isF6 and f6Down then
+                f6Down = false
+            end
+        end
     end)
 
     hook.add("Removed", "solace_cleanup", function()
@@ -4450,7 +4475,10 @@ do (function(SOLACE)
 
     hook.add("InputPressed", "solace_input_pressed", function(key)
         if key == KEY.F6 then
-            setStudioOpen(not state.studioOpen)
+            if not f6Down then
+                f6Down = true
+                toggleStudio()
+            end
             return
         end
 
@@ -4470,6 +4498,12 @@ do (function(SOLACE)
             actions.deleteSelected()
         elseif key == KEY.ESCAPE then
             sceneGraph:clearSelection()
+        end
+    end)
+
+    hook.add("InputReleased", "solace_input_released", function(key)
+        if key == KEY.F6 then
+            f6Down = false
         end
     end)
 
@@ -4501,7 +4535,7 @@ do (function(SOLACE)
         runtime:drawSprites(state)
     end)
 
-    hook.add("HUDPaint", "solace_hud_paint", function()
+    hook.add("DrawHUD", "solace_hud_paint", function()
         if not hasPermission("render.hud") then return end
         hudConnected = true
 
