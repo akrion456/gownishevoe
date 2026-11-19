@@ -52,7 +52,7 @@ if SERVER then
     return
 end
 
-setupPermissionRequest({
+local permOk = pcall(setupPermissionRequest, {
     "render.hud",
     "render.calcview",
     "hologram.create",
@@ -63,6 +63,15 @@ setupPermissionRequest({
     "file.write",
     "file.findInGame",
 }, "SOLACE Studio requires HUD rendering, Freecam view control, cursor input, clientside holograms, and asset access.", true)
+
+if not permOk then
+    pcall(setupPermissionRequest, {
+        "render.hud",
+        "render.calcview",
+        "input",
+        "input.enablecursor",
+    }, "SOLACE Studio requires HUD rendering, Freecam view control, and cursor input.", true)
+end
 
 -- ============================================================================
 -- SECTION 2: Constants and configuration
@@ -1851,17 +1860,23 @@ do (function(SOLACE)
 
     Theme.Fonts = {}
 
+    local function safeFont(name, size, weight, antialias, fallback)
+        local ok, font = pcall(render.createFont, name, size, weight, antialias)
+        if ok and font then return font end
+        return fallback or "Default"
+    end
+
     function Theme.initFonts()
         if Theme._fontsReady then return end
         Theme._fontsReady = true
 
         -- Budget: 6 fonts total (StarfallEx sf_render_maxfonts default is 30)
-        Theme.Fonts.Title    = render.createFont("Tahoma", 15, 700, true)
-        Theme.Fonts.Header   = render.createFont("Tahoma", 13, 600, true)
-        Theme.Fonts.Body     = render.createFont("Tahoma", 13, 400, true)
-        Theme.Fonts.BodyBold = render.createFont("Tahoma", 13, 600, true)
-        Theme.Fonts.Small    = render.createFont("Tahoma", 11, 500, true)
-        Theme.Fonts.Mono     = render.createFont("DejaVu Sans Mono", 12, 400, true)
+        Theme.Fonts.Title    = safeFont("Tahoma", 15, 700, true, "Trebuchet18")
+        Theme.Fonts.Header   = safeFont("Tahoma", 13, 600, true, "Trebuchet18")
+        Theme.Fonts.Body     = safeFont("Tahoma", 13, 400, true, "Default")
+        Theme.Fonts.BodyBold = safeFont("Tahoma", 13, 600, true, "Default")
+        Theme.Fonts.Small    = safeFont("Tahoma", 11, 500, true, "DebugFixedSmall")
+        Theme.Fonts.Mono     = safeFont("DejaVu Sans Mono", 12, 400, true, "DebugFixed")
     end
 
     function Theme.setColor(c, alphaOverride)
@@ -3003,10 +3018,12 @@ do (function(SOLACE)
 
         -- Bottom-left live telemetry & selection readout
         if state.grid.showTelemetry then
-            local cpuMs = cpuAverage() * 1000
-            local maxMs = cpuMax() * 1000
-            local ramMb = ramUsed() / 1024
-            local holos = hologram.hologramsLeft()
+            local cpuAvgFn = cpuAverage or quotaAverage
+            local cpuMaxFn = cpuMax or quotaMax
+            local cpuMs = cpuAvgFn and (cpuAvgFn() * 1000) or 0
+            local maxMs = cpuMaxFn and (cpuMaxFn() * 1000) or 15
+            local ramMb = ramUsed and (ramUsed() / 1024) or 0
+            local holos = (hologram and hologram.hologramsLeft) and hologram.hologramsLeft() or 0
             local selCount = #sceneGraph:getSelectedIds()
             local selNode = sceneGraph:getSelectedNode()
             local selText = selCount == 0 and "None"
@@ -3677,13 +3694,17 @@ do (function(SOLACE)
         state.sections.quotas = Widgets.sectionHeader(ui, "sec_quotas", bx, curY, bw, 22, "StarfallEx Runtime", state.sections.quotas)
         curY = curY + 26
         if state.sections.quotas then
-            local cpuMs = cpuAverage() * 1000
-            local maxMs = cpuMax() * 1000
+            local cpuAvgFn = cpuAverage or quotaAverage
+            local cpuMaxFn = cpuMax or quotaMax
+            local cpuMs = cpuAvgFn and (cpuAvgFn() * 1000) or 0
+            local maxMs = cpuMaxFn and (cpuMaxFn() * 1000) or 15
+            local ramMb = ramUsed and (ramUsed() / 1024) or 0
+            local holosLeft = (hologram and hologram.hologramsLeft) and hologram.hologramsLeft() or 0
             Widgets.keyValueRow(bx + pad, curY, innerW, 18, "CPU Avg / Cap", string.format("%.2f / %.1f ms", cpuMs, maxMs))
             curY = curY + 19
-            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "RAM Used", string.format("%.1f MB", ramUsed() / 1024))
+            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "RAM Used", string.format("%.1f MB", ramMb))
             curY = curY + 19
-            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Holograms Left", tostring(hologram.hologramsLeft()))
+            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Holograms Left", tostring(holosLeft))
             curY = curY + 19
             Widgets.keyValueRow(bx + pad, curY, innerW, 18, "render.calcview", hasPermission("render.calcview") and "OK" or "Denied",
                 hasPermission("render.calcview") and Theme.C.success or Theme.C.danger)
@@ -4302,11 +4323,23 @@ do (function(SOLACE)
     }
 
     local f6Down = false
+    local drawErrorLogged = false
+
+    local function isHudActiveSafe()
+        if type(render.isHUDActive) == "function" then
+            return render.isHUDActive()
+        end
+        return hasPermission("render.hud")
+    end
 
     local function syncCursor()
         if not hasPermission("input.enablecursor") then return end
         local wantCursor = hudConnected and state.studioOpen and (not state.viewportLooking)
-        if input.getCursorVisible() ~= wantCursor then
+        if hasPermission("input") then
+            if input.getCursorVisible() ~= wantCursor then
+                input.enableCursor(wantCursor)
+            end
+        else
             input.enableCursor(wantCursor)
         end
     end
@@ -4325,11 +4358,13 @@ do (function(SOLACE)
 
     local function toggleStudio()
         local nextOpen = not state.studioOpen
-        if nextOpen and not render.isHUDActive() and player() == owner() and hasPermission("enablehud") then
+        if nextOpen and not isHudActiveSafe() and isValid(player()) and player() == owner() and hasPermission("enablehud") then
             pcall(enableHud, nil, true)
         end
-        if render.isHUDActive() then
+        if isHudActiveSafe() then
             hudConnected = true
+        elseif nextOpen and not hasPermission("render.hud") then
+            print("[SOLACE] HUD not connected yet — press E (Use) on the Starfall chip or link a Starfall HUD component.")
         end
         setStudioOpen(nextOpen)
     end
@@ -4404,12 +4439,18 @@ do (function(SOLACE)
     timer.simple(0.05, function()
         resolveOrigin()
         camera:initFromPlayer()
-        if not render.isHUDActive() and player() == owner() and hasPermission("enablehud") then
+        if not isHudActiveSafe() and isValid(player()) and player() == owner() and hasPermission("enablehud") then
             pcall(enableHud, nil, true)
         end
-        if render.isHUDActive() or hasPermission("render.hud") then
+        if isHudActiveSafe() then
             hudConnected = true
             syncCursor()
+        end
+    end)
+
+    timer.simple(0.35, function()
+        if not isHudActiveSafe() and not hudConnected then
+            print("[SOLACE] Waiting for HUD connection — press E (Use) on the Starfall chip or link a Starfall HUD component, then press F6.")
         end
     end)
 
@@ -4573,25 +4614,42 @@ do (function(SOLACE)
         local sel = sceneGraph:getSelectedNode()
         actions.hasSelection = (sel ~= nil and sel.id ~= sceneGraph:getRootId())
 
-        -- Draw docked studio panels around the live center 3D viewport cutout
-        Toolbar.draw(ui, state, layout, rects.toolbar, actions)
-        Toolbox.draw(ui, state, rects.toolbox, actions)
-        Explorer.draw(ui, state, sceneGraph, rects.explorer, actions)
-        Properties.draw(ui, state, sceneGraph, runtime, camera, rects.properties, actions)
-        Timeline.draw(ui, state, sceneGraph, rects.timeline)
+        local ok, err = pcall(function()
+            -- Draw docked studio panels around the live center 3D viewport cutout
+            Toolbar.draw(ui, state, layout, rects.toolbar, actions)
+            Toolbox.draw(ui, state, rects.toolbox, actions)
+            Explorer.draw(ui, state, sceneGraph, rects.explorer, actions)
+            Properties.draw(ui, state, sceneGraph, runtime, camera, rects.properties, actions)
+            Timeline.draw(ui, state, sceneGraph, rects.timeline)
 
-        -- Draw viewport frame, 3D orientation triad & telemetry
-        ViewportGrid.drawOverlay(state, ui, rects.viewport, fpsSmooth, camera, sceneGraph)
+            -- Draw viewport frame, 3D orientation triad & telemetry
+            ViewportGrid.drawOverlay(state, ui, rects.viewport, fpsSmooth, camera, sceneGraph)
 
-        -- Draw interactive panel splitters on top of panel borders
-        layout:updateAndDrawSplitters(ui)
+            -- Draw interactive panel splitters on top of panel borders
+            layout:updateAndDrawSplitters(ui)
 
-        -- Viewport raycast hover & click selection (only when no UI widget/splitter is hovered/active)
-        if ui.hotId == nil and ui.activeId == nil then
-            Selection.pickAtCursor(ui, state, camera, sceneGraph, runtime, rects.viewport)
-            Selection.handleClick(ui, state, camera, sceneGraph, runtime, rects.viewport)
-        else
-            Selection.hoveredId = nil
+            -- Viewport raycast hover & click selection (only when no UI widget/splitter is hovered/active)
+            if ui.hotId == nil and ui.activeId == nil then
+                Selection.pickAtCursor(ui, state, camera, sceneGraph, runtime, rects.viewport)
+                Selection.handleClick(ui, state, camera, sceneGraph, runtime, rects.viewport)
+            else
+                Selection.hoveredId = nil
+            end
+        end)
+
+        if not ok then
+            while #ui._clipStack > 0 do
+                ui:popClip()
+            end
+            if not drawErrorLogged then
+                drawErrorLogged = true
+                print("[SOLACE] DrawHUD error: " .. tostring(err))
+            end
+            render.setFont(Theme.Fonts.BodyBold)
+            Theme.setColor(Theme.C.danger, 230)
+            render.drawRectFast(12, 12, math.min(ui.scrW - 24, 720), 34)
+            Theme.setColor(Theme.C.textPrimary)
+            render.drawSimpleText(22, 29, "SOLACE Render Error: " .. tostring(err), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
         end
 
         -- Permission warning banner if cursor/input/calcview permissions were restricted
