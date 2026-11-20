@@ -2109,23 +2109,16 @@ do (function(SOLACE)
         end
     end
 
-    local BLOCKED_STUDIO_BINDS = {
-        ["+forward"] = true,
-        ["+back"] = true,
-        ["+moveleft"] = true,
-        ["+moveright"] = true,
-        ["+jump"] = true,
-        ["+duck"] = true,
-        ["+speed"] = true,
-        ["+walk"] = true,
-        ["+attack"] = true,
-        ["+attack2"] = true,
-        ["+reload"] = true,
-        ["+use"] = true,
-        ["invnext"] = true,
-        ["invprev"] = true,
-        ["+menu"] = true,
-        ["+menu_context"] = true,
+    -- Allow only essential engine/system binds while SOLACE Studio is open;
+    -- all gameplay binds (movement, flashlight `impulse 100`, noclip, weapons, menus, etc.)
+    -- are blocked both in cursor mode AND while holding RMB in Freecam look mode.
+    local ALLOWED_STUDIO_BINDS = {
+        ["cancelselect"] = true,
+        ["toggleconsole"] = true,
+        ["jpeg"] = true,
+        ["screenshot"] = true,
+        ["pause"] = true,
+        ["escape"] = true,
     }
 
     function UIManager.new(state)
@@ -2379,9 +2372,12 @@ do (function(SOLACE)
 
     function UIManager:shouldBlockBind(bind)
         if not self.state.studioOpen then return false end
-        if self.focusedInputId then return true end
-        if self.state.viewportLooking then return false end
-        return BLOCKED_STUDIO_BINDS[bind] == true
+        local b = string.lower(string.trim(tostring(bind or "")))
+        if b == "" then return false end
+        -- Never block key-release commands (e.g. "-forward") so held keys before opening release cleanly
+        if string.sub(b, 1, 1) == "-" then return false end
+        if ALLOWED_STUDIO_BINDS[b] then return false end
+        return true
     end
 
     function UIManager:drawTooltip()
@@ -5081,7 +5077,7 @@ do (function(SOLACE)
             return
         end
 
-        if not state.studioOpen then return end
+        if not state.studioOpen or isOverlayOrUnfocused() then return end
 
         if key == KEY.ESCAPE and ui.autoScroll then
             ui:cancelAutoScroll()
@@ -5112,13 +5108,13 @@ do (function(SOLACE)
     end)
 
     hook.add("InputBindPressed", "solace_block_binds", function(bind)
-        if ui:shouldBlockBind(bind) then
+        if hudConnected and not isOverlayOrUnfocused() and ui:shouldBlockBind(bind) then
             return true
         end
     end)
 
     hook.add("MouseWheeled", "solace_mouse_wheel", function(delta)
-        if not state.studioOpen then return end
+        if not state.studioOpen or isOverlayOrUnfocused() then return end
         if state.viewportLooking then
             camera:onMouseWheelInViewport(delta)
         else
