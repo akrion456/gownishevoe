@@ -5,21 +5,22 @@
     SOLACE — Visual Animation & Effects Studio for Garry's Mod (StarfallEx)
     Create. Animate. Visualize. Export.
 
-    Self-contained single-file StarfallEx application (Phases 1 & 2 consolidated).
+    Self-contained single-file StarfallEx application (Phases 1-3).
     Self-contained: zero external includes or project dependencies.
 
-    Controls (Phase 1 & 2):
+    Controls (Phases 1-3):
       - F6            : Toggle SOLACE Studio open / minimized
       - Hold RMB      : Look around in 3D Freecam (release to restore cursor)
       - WASD          : Move Freecam horizontally
       - Space / Ctrl  : Move Freecam up / down
-      - Shift         : Boost Freecam movement speed
+      - Shift         : Boost Freecam movement speed (or Snap during gizmo drag)
       - Mouse Wheel   : Adjust Freecam speed (viewport) / scroll / zoom timeline
       - Left Click    : Select 3D object (Ctrl+Click for multi-select; empty to clear)
       - F             : Focus Freecam on selected object
       - Delete        : Delete selected object(s)
       - G             : Toggle 3D reference grid
-      - Q             : Select tool
+      - Q/1, 2, E/3, R/4 : Select / Move / Rotate / Scale tools
+      - Ctrl+Z / Ctrl+Y  : Undo / Redo transform edits (Esc cancels active drag)
 ]]
 
 local SOLACE = {}
@@ -279,6 +280,7 @@ do (function(SOLACE)
             -- Active Dear ImGui theme & style settings
             uiTheme = "dark",
             uiRounding = 4,
+            debugMode = false,
             activePropertiesTab = "inspector",
             activeTimelineTab = "tracks",
 
@@ -398,7 +400,9 @@ do (function(SOLACE)
     end
 
     function Events:emit(eventName, ...)
-        self:log("info", "Event: " .. tostring(eventName))
+        if eventName ~= "nodeUpdated" then
+            self:log("info", "Event: " .. tostring(eventName))
+        end
         local bucket = self._listeners[eventName]
         if not bucket then return end
         for _, fn in pairs(bucket) do
@@ -1317,10 +1321,24 @@ do (function(SOLACE)
 
             local holo = entry.holo
             if isValid(holo) then
-                holo:setNoDraw(not vis)
-                holo:setColor(IR.toColor(node.appearance.color))
-                if node.appearance.material and node.appearance.material ~= "" then
-                    holo:setMaterial(node.appearance.material)
+                local okVis, errVis = pcall(function() holo:setNoDraw(not vis) end)
+                local okCol, errCol = pcall(function() holo:setColor(IR.toColor(node.appearance.color)) end)
+                local desiredMat = node.appearance.material or ""
+                if (entry.appliedMat or "") ~= desiredMat then
+                    local okMat, errMat = pcall(function() holo:setMaterial(desiredMat) end)
+                    if okMat then
+                        entry.appliedMat = desiredMat
+                        if entry.errorMsg and string.sub(entry.errorMsg, 1, 9) == "Material " then
+                            entry.errorMsg = nil
+                        end
+                    else
+                        entry.errorMsg = "Material error: " .. tostring(errMat)
+                        self._lastError = entry.errorMsg
+                    end
+                end
+                if not okVis or not okCol then
+                    entry.errorMsg = "RenderProp error: " .. tostring(errVis or errCol)
+                    self._lastError = entry.errorMsg
                 end
             end
         elseif kind == Constants.NODE_KINDS.SPRITE then
@@ -1773,8 +1791,9 @@ do (function(SOLACE)
             self:onMouseWheelInViewport(ui.wheelDelta)
         end
 
-        -- Keyboard movement (disabled while typing into any TextBox)
-        if not ui.focusedInputId then
+        -- Keyboard movement (disabled while typing into any TextBox or dragging a gizmo)
+        local gizmoDragging = SOLACE.Gizmos and SOLACE.Gizmos.dragging
+        if not ui.focusedInputId and not gizmoDragging then
             local fwd = 0
             local right = 0
             local up = 0
@@ -1784,7 +1803,14 @@ do (function(SOLACE)
             if input.isKeyDown(KEY.D) then right = right + 1 end
             if input.isKeyDown(KEY.A) then right = right - 1 end
             if input.isKeyDown(KEY.SPACE) then up = up + 1 end
-            if input.isKeyDown(KEY.LCONTROL) or input.isKeyDown(KEY.RCONTROL) then up = up - 1 end
+            local ctrlDown = input.isKeyDown(KEY.LCONTROL) or input.isKeyDown(KEY.RCONTROL)
+            if ctrlDown then
+                local ctrlChord = (not self.state.viewportLooking)
+                    and (ui.leftDown or ui.leftPressed or input.isKeyDown(KEY.Z) or input.isKeyDown(KEY.Y))
+                if not ctrlChord then
+                    up = up - 1
+                end
+            end
 
             if fwd ~= 0 or right ~= 0 or up ~= 0 then
                 local moveDir = self.targetAng:getForward() * fwd
@@ -2330,10 +2356,12 @@ do (function(SOLACE)
             local pNormal = computeDragPlaneNormal(camera, origin, axisDir)
             dd.planeNormal = pNormal
             local hit = trace.intersectRayWithPlane(camera.camPos, rayDir * RAY_LEN, origin, pNormal)
-            dd.startProj = hit and (hit - origin):dot(axisDir) or 0
+            local validHit = hit and (hit - camera.camPos):dot(rayDir) > 0 and (hit - origin):getLength() <= 25000
+            dd.startProj = validHit and (hit - origin):dot(axisDir) or 0
         elseif tool == "rotate" then
             local hit = trace.intersectRayWithPlane(camera.camPos, rayDir * RAY_LEN, origin, axisDir)
-            if math.abs(rayDir:dot(axisDir)) < 0.16 or not hit then
+            local validHit = hit and (hit - camera.camPos):dot(rayDir) > 0
+            if math.abs(rayDir:dot(axisDir)) < 0.16 or not validHit then
                 dd.edgeOn = true
             else
                 local v0 = hit - origin
@@ -2367,7 +2395,7 @@ do (function(SOLACE)
 
         if tool == "move" then
             local hit = trace.intersectRayWithPlane(camera.camPos, rayDir * RAY_LEN, dd.origin, dd.planeNormal)
-            if not hit then return end
+            if not hit or (hit - camera.camPos):dot(rayDir) <= 0 or (hit - dd.origin):getLength() > 25000 then return end
             local delta = (hit - dd.origin):dot(dd.axisDir) - dd.startProj
             if shift then
                 local snap = math.max(1, (state.grid and state.grid.spacing) or 32)
@@ -2394,7 +2422,7 @@ do (function(SOLACE)
                 deltaDeg = ((ui.mx - dd.startMouseX) - (ui.my - dd.startMouseY)) * 0.6
             else
                 local hit = trace.intersectRayWithPlane(camera.camPos, rayDir * RAY_LEN, dd.origin, dd.axisDir)
-                if hit then
+                if hit and (hit - camera.camPos):dot(rayDir) > 0 then
                     local v1 = hit - dd.origin
                     if v1:getLength() > 0.001 then
                         v1 = v1:getNormalized()
@@ -2435,7 +2463,7 @@ do (function(SOLACE)
                 factor = 1.0 + pxDelta * 0.008
             else
                 local hit = trace.intersectRayWithPlane(camera.camPos, rayDir * RAY_LEN, dd.origin, dd.planeNormal)
-                if not hit then return end
+                if not hit or (hit - camera.camPos):dot(rayDir) <= 0 or (hit - dd.origin):getLength() > 25000 then return end
                 local delta = (hit - dd.origin):dot(dd.axisDir) - dd.startProj
                 factor = 1.0 + (delta / math.max(10, dd.handleLen))
             end
@@ -3504,6 +3532,14 @@ do (function(SOLACE)
                 entry.set(string.sub(txt, 1, #txt - 1))
             end
             return true
+        elseif key == KEY.DELETE then
+            return true
+        end
+
+        local ctrl = hasPermission("input") and input.isControlDown() or false
+        if ctrl then
+            -- Never swallow Ctrl+Z / Ctrl+Y / etc. as literal typed characters, and prevent accidental viewport hotkeys while typing
+            return true
         end
 
         local ch = KEY_CHAR_MAP[key]
@@ -3516,7 +3552,7 @@ do (function(SOLACE)
             return true
         end
 
-        return false
+        return true
     end
 
     function UIManager:shouldBlockBind(bind)
@@ -6079,7 +6115,7 @@ do (function(SOLACE)
         if not compactBar then
             Theme.setFont(Theme.Fonts.Small)
             Theme.setColor(Theme.C.textMuted)
-            render.drawSimpleText(cx, y + h * 0.5, "P2", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+            render.drawSimpleText(cx, y + h * 0.5, "P3", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
             cx = cx + 22
         end
 
@@ -6173,6 +6209,17 @@ do (function(SOLACE)
                 state.grid.showTelemetry = not state.grid.showTelemetry
             end
             cx = cx + statsW + 4
+        end
+
+        local dbgW = compactBar and 42 or 48
+        if cx + dbgW <= maxLeftX then
+            if Widgets.button(ui, "tb_debug", cx, by, dbgW, btnH, "Dbg", {
+                active = state.debugMode,
+                tooltip = "Toggle compact Debug Mode overlay (errors & subsystem status)",
+            }) then
+                state.debugMode = not state.debugMode
+            end
+            cx = cx + dbgW + 4
         end
 
         -- History (Undo/Redo) & Upcoming Project buttons
@@ -6872,9 +6919,19 @@ do (function(SOLACE)
                     Widgets.keyValueRow(bx + pad, curY, innerW, 18, "hologram.create", Properties._rtHoloPerm and "OK" or "Pending",
                         Properties._rtHoloPerm and Theme.C.success or Theme.C.warning)
                 end
-                curY = curY + 24
+                curY = curY + 21
+                if curY + rowH >= by and curY <= visBottom then
+                    if Widgets.button(ui, "prop_debug_mode", bx + pad, curY, innerW, rowH,
+                        "Debug Overlay: " .. (state.debugMode and "On" or "Off"), {
+                        active = state.debugMode,
+                        tooltip = "Toggle compact viewport Debug Mode overlay (errors & subsystem status)",
+                    }) then
+                        state.debugMode = not state.debugMode
+                    end
+                end
+                curY = curY + rowH + 6
             else
-                curY = curY + 100
+                curY = curY + 126
             end
         end
 
@@ -7743,6 +7800,7 @@ do (function(SOLACE)
             g.enabled = ImGui.Checkbox("Show 3D Ground Grid", g.enabled)
             g.showAxes = ImGui.Checkbox("Show 3D Origin Axes", g.showAxes)
             g.showTelemetry = ImGui.Checkbox("Show Telemetry HUD", g.showTelemetry)
+            state.debugMode = ImGui.Checkbox("Compact Debug Overlay", state.debugMode)
         end
 
         ImGui.End()
@@ -7825,8 +7883,6 @@ do (function(SOLACE)
                 h = math.max(0, win.h - titleH - 2),
             }
             drawInner(innerRect)
-        end
-        if open then
             ImGui.End()
         end
     end
@@ -8008,6 +8064,103 @@ do (function(SOLACE)
     end
 
     local lowCpuUntil = 0
+    local diagState = {
+        errorCount = 0,
+        lastError = nil,
+        lastErrKey = nil,
+        lastCacheTime = -1,
+        lines = {},
+        maxLineW = 240,
+    }
+
+    local function recordDiagError(source, err)
+        local msg = tostring(err or "unknown error")
+        local key = tostring(source) .. ":" .. msg
+        diagState.lastError = tostring(source) .. ": " .. msg
+        if diagState.lastErrKey ~= key then
+            diagState.lastErrKey = key
+            diagState.errorCount = diagState.errorCount + 1
+            events:log("error", diagState.lastError)
+            printConsole("[SOLACE ERR] " .. diagState.lastError)
+        end
+    end
+
+    local function drawDebugOverlay(vpRect, cpuRatio)
+        if not state.debugMode or not state.studioOpen or not vpRect then return end
+        if vpRect.w < 240 or vpRect.h < 130 then return end
+
+        local now = timer.realtime()
+        if now - diagState.lastCacheTime >= 0.25 or #diagState.lines == 0 then
+            diagState.lastCacheTime = now
+            local ramMb = ramUsed and (ramUsed() / 1024) or 0
+            local holosLeft = (hologram and hologram.hologramsLeft) and hologram.hologramsLeft() or 0
+            local holoCount = 0
+            local nodeCount = 0
+            for _ in pairs(sceneGraph:getAllNodes()) do
+                nodeCount = nodeCount + 1
+            end
+            for _, ent in pairs(runtime:getEntries()) do
+                if ent.holo and isValid(ent.holo) then
+                    holoCount = holoCount + 1
+                end
+            end
+
+            local rtOk = (type(render.createRenderTarget) == "function")
+            local rtErr = runtime:getLastError()
+            local errText = diagState.lastError or rtErr
+            if errText and #errText > 38 then
+                errText = string.sub(errText, 1, 35) .. "..."
+            end
+
+            diagState.lines = {
+                { text = string.format("DEBUG | %.0f FPS | CPU %d%% | %.1fMB", fpsSmooth, math.floor(cpuRatio * 100 + 0.5), ramMb), col = Theme.C.accentBright },
+                { text = string.format("HUD:%s CV:%s INP:%s CUR:%s HOLO:%s",
+                    hudConnected and "OK" or "NO",
+                    hasPermission("render.calcview") and "OK" or "NO",
+                    hasPermission("input") and "OK" or "NO",
+                    hasPermission("input.enablecursor") and "OK" or "NO",
+                    hasPermission("hologram.create") and "OK" or "NO"), col = Theme.C.textPrimary },
+                { text = string.format("Nodes:%d Holos:%d(L:%d) RT:%s U/R:%d/%d",
+                    math.max(0, nodeCount - 1), holoCount, holosLeft,
+                    rtOk and "ON" or "OFF",
+                    #commands._undoStack, #commands._redoStack), col = Theme.C.textSecondary },
+                { text = string.format("Tool:%s Axis:%s Drag:%s Look:%s",
+                    tostring(state.activeTool),
+                    tostring(Gizmos.activeAxis or Gizmos.hoveredAxis or "-"),
+                    Gizmos.dragging and "YES" or "NO",
+                    state.viewportLooking and "YES" or "NO"), col = Theme.C.textSecondary },
+                { text = errText and string.format("Err(%d): %s", diagState.errorCount, errText) or "Errors: 0 (All subsystems nominal)",
+                    col = errText and Theme.C.danger or Theme.C.success },
+            }
+
+            Theme.setFont(Theme.Fonts.Small)
+            local mw = 220
+            for i = 1, #diagState.lines do
+                local tw = render.getTextSize(diagState.lines[i].text) or 180
+                if tw > mw then mw = tw end
+            end
+            diagState.maxLineW = math.min(math.max(220, vpRect.w - 24), mw + 16)
+        end
+
+        local lineH = 15
+        local pad = 8
+        local bw = diagState.maxLineW
+        local bh = #diagState.lines * lineH + pad * 2
+        local bx = vpRect.x + vpRect.w - bw - 10
+        local by = vpRect.y + vpRect.h - bh - 10
+        if by < vpRect.y + 44 then return end
+
+        Theme.drawRoundedRect(4, bx, by, bw, bh, Theme.C.hudPill, 225)
+        Theme.setColor(diagState.lastError and Theme.C.danger or Theme.C.borderLight)
+        render.drawRectOutline(bx, by, bw, bh, 1)
+
+        Theme.setFont(Theme.Fonts.Small)
+        for i = 1, #diagState.lines do
+            local item = diagState.lines[i]
+            Theme.setColor(item.col)
+            render.drawSimpleText(bx + pad, by + pad + (i - 1) * lineH, item.text, TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+        end
+    end
 
     local function isOverlayOrUnfocused()
         if game.hasFocus and not game.hasFocus() then return true end
@@ -8059,7 +8212,10 @@ do (function(SOLACE)
     end
 
     local function toggleStudio()
-        local nextOpen = not state.studioOpen
+        local nextOpen = true
+        if hudConnected then
+            nextOpen = not state.studioOpen
+        end
         if nextOpen and not isHudActiveSafe() and isValid(player()) and player() == owner() and hasPermission("enablehud") then
             pcall(enableHud, nil, true)
         end
@@ -8253,15 +8409,20 @@ do (function(SOLACE)
     end)
 
     hook.add("Think", "solace_runtime_flush", function()
-        runtime:flush()
-        if hasPermission("input") then
-            local isF6 = input.isKeyDown(KEY.F6)
-            if isF6 and not f6Down then
-                f6Down = true
-                toggleStudio()
-            elseif not isF6 and f6Down then
-                f6Down = false
+        local ok, err = pcall(function()
+            runtime:flush()
+            if hasPermission("input") then
+                local isF6 = input.isKeyDown(KEY.F6)
+                if isF6 and not f6Down then
+                    f6Down = true
+                    toggleStudio()
+                elseif not isF6 and f6Down then
+                    f6Down = false
+                end
             end
+        end)
+        if not ok then
+            recordDiagError("Think", err)
         end
     end)
 
@@ -8362,18 +8523,30 @@ do (function(SOLACE)
 
     hook.add("PostDrawOpaqueRenderables", "solace_viewport_3d", function(depth, skybox, skybox3d)
         if skybox or skybox3d then return end
-        if not state.studioOpen then return end
+        if not state.studioOpen or not hudConnected then return end
         if isOverlayOrUnfocused() or timer.realtime() < lowCpuUntil or getCpuRatio() > 0.62 then return end
-        ViewportGrid.draw3D(state)
-        Selection.draw3D(state, camera, sceneGraph, runtime)
-        Gizmos.draw3D(state, camera, sceneGraph)
+        local ok, err = pcall(function()
+            Theme.beginFrame()
+            ViewportGrid.draw3D(state)
+            Selection.draw3D(state, camera, sceneGraph, runtime)
+        end)
+        if not ok then
+            recordDiagError("PostDrawOpaque", err)
+        end
     end)
 
     hook.add("PostDrawTranslucentRenderables", "solace_viewport_sprites", function(depth, skybox, skybox3d)
         if skybox or skybox3d then return end
-        if not state.studioOpen then return end
+        if not state.studioOpen or not hudConnected then return end
         if isOverlayOrUnfocused() or timer.realtime() < lowCpuUntil or getCpuRatio() > 0.62 then return end
-        runtime:drawSprites(state)
+        local ok, err = pcall(function()
+            Theme.beginFrame()
+            runtime:drawSprites(state)
+            Gizmos.draw3D(state, camera, sceneGraph)
+        end)
+        if not ok then
+            recordDiagError("PostDrawTranslucent", err)
+        end
     end)
 
     local rtSupported = (type(render.createRenderTarget) == "function")
@@ -8578,6 +8751,9 @@ do (function(SOLACE)
 
         local cpuRatio = getCpuRatio()
         if cpuRatio > 0.78 or isOverlayOrUnfocused() then
+            if isOverlayOrUnfocused() and state.viewportLooking then
+                state.viewportLooking = false
+            end
             if Gizmos.dragging then
                 Gizmos.finishDrag(sceneGraph, commands)
                 ui:release("gizmo_drag")
@@ -8640,7 +8816,7 @@ do (function(SOLACE)
             local fltFlags = state.floatingPanels and (tostring(state.floatingPanels.toolbox) .. tostring(state.floatingPanels.explorer) .. tostring(state.floatingPanels.properties) .. tostring(state.floatingPanels.timeline)) or ""
             local tbSig = tv .. "|" .. state.activeTool .. ":" .. tostring(actions.hasSelection)
                 .. ":" .. tostring(commands._version or 1)
-                .. ":" .. tostring(state.grid.enabled) .. tostring(state.grid.showAxes) .. tostring(state.grid.showTelemetry)
+                .. ":" .. tostring(state.grid.enabled) .. tostring(state.grid.showAxes) .. tostring(state.grid.showTelemetry) .. tostring(state.debugMode)
                 .. ":" .. tostring(state.panels.toolbox) .. tostring(state.panels.explorer) .. tostring(state.panels.properties) .. tostring(state.panels.timeline)
                 .. ":" .. winFlags .. ":" .. fltFlags
             drawCachedPanel("toolbar", rects.toolbar, tbSig, actPrefix3 == "tb_", allowRepaint, function(r)
@@ -8672,7 +8848,7 @@ do (function(SOLACE)
                 .. "|" .. tostring(sel and sel.visible) .. "|" .. #selIds .. "|" .. selXform
                 .. "|" .. c.speed .. ":" .. c.boostMult .. ":" .. c.sensitivity .. ":" .. c.fov .. ":" .. c.smoothing
                 .. "|" .. tostring(g.enabled) .. ":" .. g.spacing .. ":" .. g.halfExtents .. ":" .. g.originMode
-                .. ":" .. tostring(g.showOrientationGizmo) .. ":" .. tostring(g.showTelemetry)
+                .. ":" .. tostring(g.showOrientationGizmo) .. ":" .. tostring(g.showTelemetry) .. ":" .. tostring(state.debugMode)
                 .. "|" .. tostring(s.selection) .. tostring(s.camera) .. tostring(s.grid) .. tostring(s.origin) .. tostring(s.quotas)
                 .. "|" .. (s.quotas and math.floor(ui._frameTime * 5) or 0)
                 .. "|" .. (propFocus and blinkPhase or "")
@@ -8703,21 +8879,24 @@ do (function(SOLACE)
                 ImGui.DrawNotifications(ui, layout)
 
                 -- Interactive 3D transform gizmo picking & dragging (before object selection so gizmo handles capture clicks)
-                if Gizmos.dragging or not ImGui.isPointOverAnyWindow(ui.mx, ui.my) then
+                local overAnyFloating = (ui._topHoverWinId ~= nil) or ImGui.isPointOverAnyWindow(ui.mx, ui.my)
+                if Gizmos.dragging or not overAnyFloating then
                     Gizmos.update(ui, state, camera, sceneGraph, commands, rects.viewport, overlayPaused)
                 else
                     Gizmos.hoveredAxis = nil
                 end
                 Gizmos.drawOverlay(ui, state, rects.viewport)
 
-                -- Viewport raycast hover & click selection (only when no UI widget/gizmo/splitter/floating window is hovered/active)
+                -- Viewport raycast hover & click selection (only when no UI widget/gizmo/splitter/floating window/popup is hovered/active)
                 if ui.hotId == nil and ui.activeId == nil and not ui.autoScroll and not ui._autoScrollConsumed
-                    and not ImGui.isPointOverAnyWindow(ui.mx, ui.my) then
+                    and not overAnyFloating then
                     Selection.pickAtCursor(ui, state, camera, sceneGraph, runtime, rects.viewport)
                     Selection.handleClick(ui, state, camera, sceneGraph, runtime, rects.viewport)
                 else
                     Selection.hoveredId = nil
                 end
+
+                drawDebugOverlay(rects.viewport, cpuRatio)
             elseif Gizmos.dragging then
                 Gizmos.finishDrag(sceneGraph, commands)
                 ui:release("gizmo_drag")
@@ -8734,10 +8913,10 @@ do (function(SOLACE)
             while #ui._clipStack > 0 do
                 ui:popClip()
             end
+            recordDiagError("DrawHUD", err)
             if not drawErrorLogged then
                 drawErrorLogged = true
                 print("[SOLACE] DrawHUD error: " .. tostring(err))
-                printConsole("[SOLACE] DrawHUD error: " .. tostring(err))
             end
             local sw = ui.scrW or render.getResolution()
             render.setFont(Theme.Fonts.BodyBold)
