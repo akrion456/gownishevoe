@@ -5,10 +5,10 @@
     SOLACE — Visual Animation & Effects Studio for Garry's Mod (StarfallEx)
     Create. Animate. Visualize. Export.
 
-    Self-contained single-file StarfallEx application (Phases 1-3).
+    Self-contained single-file StarfallEx application (Phases 1-4).
     Self-contained: zero external includes or project dependencies.
 
-    Controls (Phases 1-3):
+    Controls (Phases 1-4):
       - F6            : Toggle SOLACE Studio open / minimized
       - Hold RMB      : Look around in 3D Freecam (release to restore cursor)
       - WASD          : Move Freecam horizontally
@@ -20,7 +20,8 @@
       - Delete        : Delete selected object(s)
       - G             : Toggle 3D reference grid
       - Q/1, 2, E/3, R/4 : Select / Move / Rotate / Scale tools
-      - Ctrl+Z / Ctrl+Y  : Undo / Redo transform edits (Esc cancels active drag)
+      - Ctrl+D        : Duplicate selected object(s) / hierarchy
+      - Ctrl+Z / Ctrl+Y  : Undo / Redo edits (Esc cancels active drag/input)
 ]]
 
 local SOLACE = {}
@@ -94,8 +95,11 @@ do (function(SOLACE)
     Constants.APP_NAME = "SOLACE"
     Constants.APP_SUBTITLE = "Visual Animation & Effects Studio"
     Constants.APP_TAGLINE = "Create. Animate. Visualize. Export."
-    Constants.VERSION = "0.3.0-phase3"
+    Constants.VERSION = "0.4.0-phase4"
     Constants.IR_SCHEMA_VERSION = 1
+    Constants.MIN_SCALE = 0.05
+    Constants.MAX_SCALE = 100.0
+    Constants.DUPLICATE_OFFSET = { 16, 16, 0 }
 
     -- Node types supported by the Scene Intermediate Representation (IR)
     Constants.NODE_KINDS = {
@@ -218,6 +222,7 @@ do (function(SOLACE)
             explorerSearch = "",
             customModelPath = "models/props_c17/oildrum001.mdl",
             spawnDistance = 140,
+            duplicateOffset = { Constants.DUPLICATE_OFFSET[1], Constants.DUPLICATE_OFFSET[2], Constants.DUPLICATE_OFFSET[3] },
 
             -- Freecam settings
             camera = {
@@ -287,6 +292,8 @@ do (function(SOLACE)
             -- Property section collapse state
             sections = {
                 selection = true,
+                transform = true,
+                appearance = true,
                 camera = true,
                 grid = true,
                 origin = false,
@@ -509,11 +516,14 @@ do (function(SOLACE)
 
     local function applyTransformSnapshot(sceneGraph, id, snap)
         local node = sceneGraph:getNode(id)
-        if not node or not node.transform then return end
+        if not node or not node.transform or not snap then return end
         local t = node.transform
         t.pos[1], t.pos[2], t.pos[3] = snap.pos[1], snap.pos[2], snap.pos[3]
         t.ang[1], t.ang[2], t.ang[3] = snap.ang[1], snap.ang[2], snap.ang[3]
         t.scale[1], t.scale[2], t.scale[3] = snap.scale[1], snap.scale[2], snap.scale[3]
+        if snap.pivot and t.pivot then
+            t.pivot[1], t.pivot[2], t.pivot[3] = snap.pivot[1], snap.pivot[2], snap.pivot[3]
+        end
         sceneGraph:notifyNodeUpdated(id)
     end
 
@@ -532,6 +542,174 @@ do (function(SOLACE)
                     local e = entries[i]
                     applyTransformSnapshot(sceneGraph, e.id, e.after)
                 end
+            end,
+        }
+    end
+
+    -- Reparent one or more nodes while restoring exact parent/index/local-transform on Undo/Redo
+    function Commands.createReparentCommand(sceneGraph, label, entries, prevSelIds, prevPrimaryId)
+        return {
+            label = label or "Reparent",
+            undo = function()
+                for i = #entries, 1, -1 do
+                    local e = entries[i]
+                    sceneGraph:reparentNode(e.id, e.oldParentId, e.oldIndex, false)
+                    if e.oldTransform then
+                        applyTransformSnapshot(sceneGraph, e.id, e.oldTransform)
+                    end
+                end
+                if prevSelIds then
+                    sceneGraph:setSelectionList(prevSelIds, prevPrimaryId)
+                end
+            end,
+            redo = function()
+                for i = 1, #entries do
+                    local e = entries[i]
+                    sceneGraph:reparentNode(e.id, e.newParentId, e.newIndex, false)
+                    if e.newTransform then
+                        applyTransformSnapshot(sceneGraph, e.id, e.newTransform)
+                    end
+                end
+            end,
+        }
+    end
+
+    -- Duplicate one or more subtrees in one atomic command
+    function Commands.createDuplicateCommand(sceneGraph, label, specs, prevSelIds, prevPrimaryId)
+        return {
+            label = label or "Duplicate",
+            undo = function()
+                for i = #specs, 1, -1 do
+                    sceneGraph:removeNode(specs[i].rootId)
+                end
+                sceneGraph:setSelectionList(prevSelIds or {}, prevPrimaryId)
+            end,
+            redo = function()
+                local newIds = {}
+                for i = 1, #specs do
+                    local sp = specs[i]
+                    local insertedRoot = sceneGraph:insertSubtreeSnapshot(sp.snapshot, sp.parentId, sp.insertIndex)
+                    if insertedRoot then
+                        newIds[#newIds + 1] = insertedRoot.id
+                    end
+                end
+                if #newIds > 0 then
+                    sceneGraph:setSelectionList(newIds, newIds[#newIds])
+                end
+            end,
+        }
+    end
+
+    -- Edit appearance (color RGBA, material, visibility) for one or more nodes
+    function Commands.createAppearanceCommand(sceneGraph, label, entries)
+        local function applyApp(id, snap)
+            local node = sceneGraph:getNode(id)
+            if not node or not snap then return end
+            if snap.color ~= nil and node.appearance and node.appearance.color then
+                local c = node.appearance.color
+                c[1], c[2], c[3], c[4] = snap.color[1], snap.color[2], snap.color[3], snap.color[4]
+            end
+            if snap.material ~= nil and node.appearance then
+                node.appearance.material = snap.material
+            end
+            if snap.visible ~= nil and id ~= sceneGraph:getRootId() then
+                node.visible = snap.visible
+            end
+            sceneGraph:notifyNodeUpdated(id)
+        end
+        return {
+            label = label or "Appearance",
+            undo = function()
+                for i = 1, #entries do
+                    local e = entries[i]
+                    applyApp(e.id, e.before)
+                end
+            end,
+            redo = function()
+                for i = 1, #entries do
+                    local e = entries[i]
+                    applyApp(e.id, e.after)
+                end
+            end,
+        }
+    end
+
+    -- Group selected top-level nodes into a newly created Group in one undoable command
+    function Commands.createGroupSelectedCommand(sceneGraph, label, groupSnapshot, groupParentId, moveEntries, prevSelIds, prevPrimaryId)
+        return {
+            label = label or "Group Selected",
+            undo = function()
+                for i = #moveEntries, 1, -1 do
+                    local e = moveEntries[i]
+                    sceneGraph:reparentNode(e.id, e.oldParentId, e.oldIndex, false)
+                    if e.oldTransform then
+                        applyTransformSnapshot(sceneGraph, e.id, e.oldTransform)
+                    end
+                end
+                sceneGraph:removeNode(groupSnapshot.root.id)
+                sceneGraph:setSelectionList(prevSelIds or {}, prevPrimaryId)
+            end,
+            redo = function()
+                local grp = sceneGraph:insertSubtreeSnapshot(groupSnapshot, groupParentId)
+                for i = 1, #moveEntries do
+                    local e = moveEntries[i]
+                    sceneGraph:reparentNode(e.id, grp.id, nil, false)
+                    if e.newTransform then
+                        applyTransformSnapshot(sceneGraph, e.id, e.newTransform)
+                    end
+                end
+                if grp then
+                    sceneGraph:setSelectedId(grp.id)
+                end
+            end,
+        }
+    end
+
+    -- Add a single node/subtree (e.g. Create Folder / Group) with Undo/Redo
+    function Commands.createAddNodeCommand(sceneGraph, label, snapshot, parentId, insertIndex, prevSelIds, prevPrimaryId)
+        return {
+            label = label or "Create Node",
+            undo = function()
+                sceneGraph:removeNode(snapshot.root.id)
+                sceneGraph:setSelectionList(prevSelIds or {}, prevPrimaryId)
+            end,
+            redo = function()
+                local node = sceneGraph:insertSubtreeSnapshot(snapshot, parentId, insertIndex)
+                if node then
+                    sceneGraph:setSelectedId(node.id)
+                end
+            end,
+        }
+    end
+
+    -- Delete one or more subtrees with full Undo/Redo restoration
+    function Commands.createDeleteCommand(sceneGraph, label, deletedSpecs, prevSelIds, prevPrimaryId)
+        return {
+            label = label or "Delete",
+            undo = function()
+                for i = #deletedSpecs, 1, -1 do
+                    local sp = deletedSpecs[i]
+                    sceneGraph:insertSubtreeSnapshot(sp.snapshot, sp.parentId, sp.index)
+                end
+                sceneGraph:setSelectionList(prevSelIds or {}, prevPrimaryId)
+            end,
+            redo = function()
+                for i = 1, #deletedSpecs do
+                    sceneGraph:removeNode(deletedSpecs[i].rootId)
+                end
+            end,
+        }
+    end
+
+    -- Rename a node with Undo/Redo
+    function Commands.createRenameCommand(sceneGraph, id, oldName, newName)
+        return {
+            label = "Rename",
+            undo = function()
+                sceneGraph:renameNode(id, oldName)
+            end,
+            redo = function()
+                sceneGraph:renameNode(id, newName)
             end,
         }
     end
@@ -869,6 +1047,65 @@ do (function(SOLACE)
         end
     end
 
+    function SceneGraph:setSelectionList(ids, primaryId)
+        local clean = {}
+        local map = {}
+        if ids then
+            for i = 1, #ids do
+                local id = ids[i]
+                if id and self._project.nodes[id] and not map[id] then
+                    map[id] = true
+                    clean[#clean + 1] = id
+                end
+            end
+        end
+        if #clean == 0 then
+            self:clearSelection()
+            return
+        end
+        local prim = (primaryId and map[primaryId]) and primaryId or clean[#clean]
+        self._selectedIds = clean
+        self._selectedMap = map
+        self._primarySelectedId = prim
+        if self._events then
+            self._events:emit("selectionChanged", prim, self:getNode(prim), self._selectedIds)
+        end
+    end
+
+    -- Returns selected non-root IDs excluding any node whose ancestor is also selected
+    function SceneGraph:getTopLevelSelectedIds()
+        local rootId = self._project.rootId
+        local selMap = {}
+        for i = 1, #self._selectedIds do
+            local id = self._selectedIds[i]
+            if id ~= rootId and self._project.nodes[id] then
+                selMap[id] = true
+            end
+        end
+        local out = {}
+        for i = 1, #self._selectedIds do
+            local id = self._selectedIds[i]
+            if selMap[id] then
+                local node = self._project.nodes[id]
+                local cur = node and node.parentId and self._project.nodes[node.parentId] or nil
+                local hasSelAnc = false
+                local guard = 0
+                while cur and cur.id ~= rootId and guard < 64 do
+                    if selMap[cur.id] then
+                        hasSelAnc = true
+                        break
+                    end
+                    cur = cur.parentId and self._project.nodes[cur.parentId] or nil
+                    guard = guard + 1
+                end
+                if not hasSelAnc then
+                    out[#out + 1] = id
+                end
+            end
+        end
+        return out
+    end
+
     function SceneGraph:isDirty()
         return self._dirty
     end
@@ -1144,6 +1381,218 @@ do (function(SOLACE)
 
     function SceneGraph:setProjectName(name)
         self:renameNode(self._project.rootId, name)
+    end
+
+    local function deepCopyTable(val, seen)
+        if type(val) ~= "table" then return val end
+        seen = seen or {}
+        if seen[val] then return seen[val] end
+        local copy = {}
+        seen[val] = copy
+        for k, v in pairs(val) do
+            copy[deepCopyTable(k, seen)] = deepCopyTable(v, seen)
+        end
+        return copy
+    end
+
+    function SceneGraph:isDescendant(candidateId, ancestorId)
+        if not candidateId or not ancestorId then return false end
+        if candidateId == ancestorId then return true end
+        local rootId = self._project.rootId
+        local cur = self._project.nodes[candidateId]
+        local guard = 0
+        while cur and guard < 64 do
+            if cur.id == ancestorId then return true end
+            if cur.id == rootId or not cur.parentId then break end
+            cur = self._project.nodes[cur.parentId]
+            guard = guard + 1
+        end
+        return false
+    end
+
+    function SceneGraph:canAcceptChild(parentId)
+        local parent = self:getNode(parentId)
+        if not parent then return false end
+        local k = parent.kind
+        return k == Constants.NODE_KINDS.ROOT
+            or k == Constants.NODE_KINDS.GROUP
+            or k == Constants.NODE_KINDS.FOLDER
+    end
+
+    function SceneGraph:canReparent(nodeId, newParentId)
+        if not nodeId or not newParentId then return false, "Missing node" end
+        local rootId = self._project.rootId
+        if nodeId == rootId then return false, "Cannot reparent Scene Root" end
+        if nodeId == newParentId then return false, "Cannot parent object to itself" end
+        local node = self:getNode(nodeId)
+        local newParent = self:getNode(newParentId)
+        if not node or not newParent then return false, "Node not found" end
+        if not self:canAcceptChild(newParentId) then
+            return false, "Target node cannot contain children"
+        end
+        if self:isDescendant(newParentId, nodeId) then
+            return false, "Circular hierarchy not allowed"
+        end
+        return true, nil
+    end
+
+    function SceneGraph:getChildIndex(parentId, childId)
+        local parent = self:getNode(parentId)
+        if not parent then return nil end
+        for i = 1, #parent.children do
+            if parent.children[i] == childId then
+                return i
+            end
+        end
+        return nil
+    end
+
+    function SceneGraph:reparentNode(nodeId, newParentId, insertIndex, preserveWorld)
+        local ok, reason = self:canReparent(nodeId, newParentId)
+        if not ok then return false, reason end
+
+        local node = self:getNode(nodeId)
+        local oldParent = node.parentId and self:getNode(node.parentId) or nil
+        local newParent = self:getNode(newParentId)
+
+        local wPos, wAng, wScale
+        if preserveWorld and SOLACE.Math3D and SOLACE.Math3D.computeWorldTransform then
+            wPos, wAng, wScale = SOLACE.Math3D.computeWorldTransform(self, nodeId)
+        end
+
+        local oldIndex = nil
+        if oldParent then
+            for i = #oldParent.children, 1, -1 do
+                if oldParent.children[i] == nodeId then
+                    oldIndex = i
+                    table.remove(oldParent.children, i)
+                    break
+                end
+            end
+        end
+
+        local targetIdx = insertIndex or (#newParent.children + 1)
+        if oldParent == newParent and oldIndex and insertIndex and oldIndex < insertIndex then
+            targetIdx = targetIdx - 1
+        end
+        targetIdx = math.clamp(targetIdx, 1, #newParent.children + 1)
+        table.insert(newParent.children, targetIdx, nodeId)
+        node.parentId = newParentId
+        if newParentId ~= self._project.rootId then
+            newParent.expanded = true
+        end
+
+        if preserveWorld and wPos and SOLACE.Math3D and SOLACE.Math3D.worldTransformToParentLocal then
+            local lPos, lAng, lScale = SOLACE.Math3D.worldTransformToParentLocal(self, newParentId, wPos, wAng, wScale)
+            if node.transform then
+                node.transform.pos = lPos
+                node.transform.ang = lAng
+                node.transform.scale = lScale
+            end
+        end
+
+        self:markDirty()
+        if self._events then
+            self._events:emit("nodeUpdated", node)
+        end
+        return true, nil
+    end
+
+    -- Deep-clones a node subtree into a standalone snapshot (preserveIds=true for Delete/Undo, false for Duplicate)
+    function SceneGraph:cloneSubtreeSnapshot(rootNodeId, preserveIds, topNameSuffix)
+        local srcRoot = self:getNode(rootNodeId)
+        if not srcRoot or rootNodeId == self._project.rootId then return nil end
+
+        local list = {}
+        local idMap = {}
+
+        local function collect(nid, isTop)
+            local src = self:getNode(nid)
+            if not src then return nil end
+            local newId = preserveIds and src.id or self:generateId(src.kind)
+            idMap[src.id] = newId
+
+            local copy = deepCopyTable(src)
+            copy.id = newId
+            if isTop and topNameSuffix and topNameSuffix ~= "" then
+                copy.name = src.name .. topNameSuffix
+            end
+            if not preserveIds then
+                copy.exportName = Utils.sanitizeExportName(copy.name) .. "_" .. string.sub(newId, -4)
+            end
+
+            local newChildren = {}
+            for i = 1, #src.children do
+                local childCopy = collect(src.children[i], false)
+                if childCopy then
+                    childCopy.parentId = newId
+                    newChildren[#newChildren + 1] = childCopy.id
+                end
+            end
+            copy.children = newChildren
+            list[#list + 1] = copy
+            return copy
+        end
+
+        local clonedRoot = collect(rootNodeId, true)
+        return {
+            root = clonedRoot,
+            nodes = list, -- post-order; children added before parents or in any order
+        }
+    end
+
+    function SceneGraph:insertSubtreeSnapshot(snapshot, parentId, insertIndex)
+        if not snapshot or not snapshot.root or not snapshot.nodes then return nil end
+        local pId = parentId or self._project.rootId
+        local parent = self:getNode(pId)
+        if not parent then
+            pId = self._project.rootId
+            parent = self:getNode(pId)
+        end
+
+        -- Insert copies so snapshot stays immutable across repeated undo/redo cycles
+        local inserted = {}
+        for i = 1, #snapshot.nodes do
+            local copy = deepCopyTable(snapshot.nodes[i])
+            self._project.nodes[copy.id] = copy
+            inserted[#inserted + 1] = copy
+        end
+
+        local rootCopy = self._project.nodes[snapshot.root.id]
+        if not rootCopy then return nil end
+        rootCopy.parentId = pId
+
+        local idx = math.clamp(insertIndex or (#parent.children + 1), 1, #parent.children + 1)
+        table.insert(parent.children, idx, rootCopy.id)
+        if pId ~= self._project.rootId then
+            parent.expanded = true
+        end
+
+        self:markDirty()
+        if self._events then
+            for i = 1, #inserted do
+                self._events:emit("nodeAdded", inserted[i])
+            end
+        end
+        return rootCopy
+    end
+
+    function SceneGraph:buildNodeSnapshot(kind, name, posTbl, angTbl, extra)
+        local id = self:generateId(kind)
+        local opts = {}
+        if extra then
+            for k, v in pairs(extra) do opts[k] = v end
+        end
+        opts.kind = kind
+        opts.id = id
+        opts.name = name
+        opts.exportName = opts.exportName or (Utils.sanitizeExportName(name) .. "_" .. string.sub(id, -4))
+        opts.transform = opts.transform or { pos = posTbl, ang = angTbl }
+        local node = IR.createNode(opts)
+        return {
+            root = node,
+            nodes = { node },
+        }
     end
 
 
@@ -1607,6 +2056,46 @@ do (function(SOLACE)
         m:setAngles(worldAng)
         local localAng = (parentInvRot * m):getAngles()
         return { localAng[1], localAng[2], localAng[3] }
+    end
+
+    -- Converts a world-space transform (Vector, Angle, Vector) into local { pos, ang, scale } under parentId
+    function Math3D.worldTransformToParentLocal(sceneGraph, parentId, worldPos, worldAng, worldScale)
+        local minS = (SOLACE.Constants and SOLACE.Constants.MIN_SCALE) or 0.05
+        local maxS = (SOLACE.Constants and SOLACE.Constants.MAX_SCALE) or 100.0
+        local ws = worldScale or Vector(1, 1, 1)
+        local wa = worldAng or Angle(0, 0, 0)
+        local wp = worldPos or Vector(0, 0, 0)
+
+        local rootId = sceneGraph and sceneGraph:getRootId() or "root"
+        if not parentId or parentId == rootId then
+            return { math.round(wp[1], 3), math.round(wp[2], 3), math.round(wp[3], 3) },
+                   { math.round(math.normalizeAngle(wa[1]), 2), math.round(math.normalizeAngle(wa[2]), 2), math.round(math.normalizeAngle(wa[3]), 2) },
+                   { math.clamp(math.round(ws[1], 3), minS, maxS), math.clamp(math.round(ws[2], 3), minS, maxS), math.clamp(math.round(ws[3], 3), minS, maxS) }
+        end
+
+        local pPos, pAng, pScale = Math3D.computeWorldTransform(sceneGraph, parentId)
+        local pMat = Matrix()
+        pMat:translate(pPos)
+        pMat:rotate(pAng)
+        local pInv = pMat:getInverseTR()
+
+        local lPos = pInv * wp
+        local mWorld = Matrix()
+        mWorld:setAngles(wa)
+        local lAng = (pInv * mWorld):getAngles()
+
+        local function safeDiv(a, b)
+            if math.abs(b or 1) < 1e-4 then return a end
+            return a / b
+        end
+
+        return { math.round(lPos[1], 3), math.round(lPos[2], 3), math.round(lPos[3], 3) },
+               { math.round(math.normalizeAngle(lAng[1]), 2), math.round(math.normalizeAngle(lAng[2]), 2), math.round(math.normalizeAngle(lAng[3]), 2) },
+               {
+                   math.clamp(math.round(safeDiv(ws[1], pScale[1]), 3), minS, maxS),
+                   math.clamp(math.round(safeDiv(ws[2], pScale[2]), 3), minS, maxS),
+                   math.clamp(math.round(safeDiv(ws[3], pScale[3]), 3), minS, maxS),
+               }
     end
 
     -- Local orthonormal gizmo basis in world space (Source: +X Forward, +Y Left/-Right, +Z Up)
@@ -3306,6 +3795,7 @@ do (function(SOLACE)
             autoScroll = nil,     -- Active browser-style MMB autoscroll session
             _autoScrollConsumed = false,
             _inputState = {},     -- Per-TextBox transient cursor/value callbacks
+            _editBuffers = {},    -- Per-editField transient input strings
             _tooltipText = nil,
             _tooltipTimer = 0,
             _lastHoverId = nil,
@@ -3407,6 +3897,12 @@ do (function(SOLACE)
 
     function UIManager:endFrame(dt)
         if self._pendingClearFocus then
+            if self.focusedInputId then
+                local entry = self._inputState[self.focusedInputId]
+                if entry and entry.onBlur then
+                    entry.onBlur(entry.get())
+                end
+            end
             self.focusedInputId = nil
             self._pendingClearFocus = false
         end
@@ -3498,15 +3994,23 @@ do (function(SOLACE)
         end
     end
 
-    function UIManager:registerTextInput(id, getter, setter, onSubmit)
+    function UIManager:registerTextInput(id, getter, setter, onSubmit, onCancel, onBlur)
         self._inputState[id] = {
             get = getter,
             set = setter,
             onSubmit = onSubmit,
+            onCancel = onCancel,
+            onBlur = onBlur,
         }
     end
 
     function UIManager:focusTextInput(id)
+        if self.focusedInputId and self.focusedInputId ~= id then
+            local prev = self._inputState[self.focusedInputId]
+            if prev and prev.onBlur then
+                prev.onBlur(prev.get())
+            end
+        end
         self.focusedInputId = id
         self._pendingClearFocus = false
     end
@@ -3520,6 +4024,7 @@ do (function(SOLACE)
         end
 
         if key == KEY.ESCAPE then
+            if entry.onCancel then entry.onCancel() end
             self.focusedInputId = nil
             return true
         elseif key == KEY.ENTER or key == KEY.PAD_ENTER then
@@ -3924,6 +4429,97 @@ do (function(SOLACE)
         Theme.setFont(Theme.Fonts.Mono)
         Theme.setColor(valColor or Theme.C.textPrimary)
         render.drawSimpleText(x + w, y + h * 0.5, tostring(valText), TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+    end
+
+    -- Compact buffered edit field (no per-character undo; commits on Enter or blur, reverts on Esc)
+    function Widgets.editField(ui, id, x, y, w, h, displayText, rawEditText, opts)
+        opts = opts or {}
+        local isFocused = (ui.focusedInputId == id)
+        local hot = ui:hitTest(id, x, y, w, h)
+        if hot and opts.tooltip then
+            ui:setTooltip(opts.tooltip)
+        end
+
+        local function commitBuf(buf)
+            local v = buf
+            ui._editBuffers[id] = nil
+            if opts.onCommit then
+                opts.onCommit(v)
+            end
+        end
+
+        local function cancelBuf()
+            ui._editBuffers[id] = nil
+            if opts.onCancel then
+                opts.onCancel()
+            end
+        end
+
+        ui:registerTextInput(
+            id,
+            function()
+                return ui._editBuffers[id] or tostring(rawEditText or "")
+            end,
+            function(v)
+                ui._editBuffers[id] = v
+            end,
+            commitBuf,
+            cancelBuf,
+            commitBuf
+        )
+
+        if hot and ui.leftPressed then
+            if not isFocused then
+                ui._editBuffers[id] = tostring(rawEditText or "")
+            end
+            ui:focusTextInput(id)
+            isFocused = true
+        end
+
+        local bg = isFocused and Theme.C.bgControl or (hot and Theme.C.bgControlHover or Theme.C.bgInput)
+        local border = isFocused and Theme.C.borderFocus or (hot and Theme.C.borderLight or Theme.C.border)
+        Theme.drawRoundedRect(3, x, y, w, h, bg)
+        Theme.setColor(border)
+        render.drawRectOutline(x, y, w, h, 1)
+
+        local textX = x + 5
+        if opts.barColor then
+            Theme.setColor(opts.barColor)
+            render.drawRectFast(x + 1, y + 1, 3, math.max(1, h - 2))
+            textX = x + 7
+        end
+        if opts.prefix and opts.prefix ~= "" then
+            Theme.setFont(Theme.Fonts.Small)
+            Theme.setColor(opts.barColor or Theme.C.textMuted)
+            render.drawSimpleText(textX, y + h * 0.5, opts.prefix, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+            textX = textX + 12
+        end
+
+        local raw = isFocused and (ui._editBuffers[id] or "") or tostring(displayText or "")
+        local showPlaceholder = (not isFocused) and raw == "" and opts.placeholder and opts.placeholder ~= ""
+        local shown = showPlaceholder and opts.placeholder or raw
+        local font = (opts.mono ~= false) and Theme.Fonts.Mono or Theme.Fonts.Body
+        Theme.setFont(font)
+
+        ui:pushClip(textX - 1, y + 1, math.max(4, (x + w - 4) - textX), math.max(2, h - 2))
+        local tw = render.getTextSize(shown) or 0
+        local maxTextW = math.max(8, (x + w - 6) - textX)
+        local alignRight = (isFocused and tw > maxTextW)
+        Theme.setColor(showPlaceholder and Theme.C.textMuted or Theme.C.textPrimary)
+        if alignRight then
+            render.drawSimpleText(x + w - 5, y + h * 0.5, shown, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+        else
+            render.drawSimpleText(textX, y + h * 0.5, shown, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+        end
+
+        if isFocused and (math.floor(ui._frameTime * 2.2) % 2 == 0) then
+            local cx = alignRight and (x + w - 4) or math.min(x + w - 4, textX + tw + 1)
+            Theme.setColor(Theme.C.accentBright)
+            render.drawRectFast(cx, y + 3, 1.5, math.max(4, h - 6))
+        end
+        ui:popClip()
+
+        return isFocused
     end
 
     function Widgets.phaseNotice(x, y, w, title, bodyLines, phaseBadge)
@@ -5170,6 +5766,21 @@ do (function(SOLACE)
         return outIdx, changed
     end
 
+    function ImGui.openContextMenu(id, x, y, items, minW)
+        if not items or #items == 0 then return end
+        ImGui._activePopup = {
+            id = id or "ctx_menu",
+            isContextMenu = true,
+            x = x,
+            y = y,
+            w = math.max(minW or 184, 160),
+            items = items,
+            scroll = 0,
+            maxShow = 16,
+        }
+        ImGui._activePopupCloseRequested = false
+    end
+
     function ImGui.DrawPopups(ui)
         local p = ImGui._activePopup
         if not p then
@@ -5179,53 +5790,98 @@ do (function(SOLACE)
 
         local items = p.items or {}
         local itemH = 22
-        local vis = math.min(#items, p.maxShow or 8)
-        local popH = vis * itemH + 8
-        local px = math.clamp(p.x, 4, math.max(4, ui.scrW - p.w - 4))
+        local sepH = 7
+
+        local popW = p.w or 160
+        if p.isContextMenu then
+            Theme.setFont(Theme.Fonts.Body)
+            for i = 1, #items do
+                local it = items[i]
+                if type(it) == "table" and not it.separator then
+                    local lw = render.getTextSize(tostring(it.label or "")) or 80
+                    local sw = it.shortcut and (render.getTextSize(tostring(it.shortcut)) or 40) or 0
+                    local need = lw + (sw > 0 and (sw + 28) or 0) + 26
+                    if need > popW then popW = need end
+                end
+            end
+        end
+
+        local vis = math.min(#items, p.maxShow or 10)
+        local popH = 8
+        local startIdx = (p.scroll or 0) + 1
+        local endIdx = math.min(#items, startIdx + vis - 1)
+        for i = startIdx, endIdx do
+            local it = items[i]
+            if type(it) == "table" and it.separator then
+                popH = popH + sepH
+            else
+                popH = popH + itemH
+            end
+        end
+
+        local px = math.clamp(p.x, 4, math.max(4, ui.scrW - popW - 4))
         local py = math.clamp(p.y, 4, math.max(4, ui.scrH - popH - 4))
         p.x, p.y, p.h = px, py, popH
-        ImGui._activePopupRect = { px, py, p.w, popH }
+        ImGui._activePopupRect = { px, py, popW, popH }
 
         ui:setWindowContext("__popup__", true)
 
-        if #items > vis and ui.wheelDelta ~= 0 and ui:pointInRect(px, py, p.w, popH) then
+        if #items > vis and ui.wheelDelta ~= 0 and ui:pointInRect(px, py, popW, popH) then
             p.scroll = math.clamp((p.scroll or 0) - math.floor(ui.wheelDelta), 0, #items - vis)
         end
 
         -- Drop shadow + popup surface
-        Theme.drawRoundedRect(Theme.Style.popupRounding or 4, px + 2, py + 3, p.w, popH, Theme.C.bgApp, 150)
-        Theme.drawRoundedRect(Theme.Style.popupRounding or 4, px, py, p.w, popH, Theme.C.bgPopup)
+        Theme.drawRoundedRect(Theme.Style.popupRounding or 4, px + 2, py + 3, popW, popH, Theme.C.bgApp, 150)
+        Theme.drawRoundedRect(Theme.Style.popupRounding or 4, px, py, popW, popH, Theme.C.bgPopup)
         Theme.setColor(Theme.C.borderFocus)
-        render.drawRectOutline(px, py, p.w, popH, 1)
+        render.drawRectOutline(px, py, popW, popH, 1)
 
-        local startIdx = (p.scroll or 0) + 1
-        local endIdx = math.min(#items, startIdx + vis - 1)
+        local curY = py + 4
         for i = startIdx, endIdx do
-            local rowIdx = i - startIdx
-            local iy = py + 4 + rowIdx * itemH
-            local isSel = (i == p.selectedIdx)
-            local hot, cap = ui:hitTest(p.id .. "_opt_" .. i, px + 4, iy, p.w - 8, itemH)
-            if hot and ui.leftPressed then
-                ui:capture(p.id .. "_opt_" .. i)
-            end
-            if cap and ui.leftReleased and hot then
-                if p.onPick then p.onPick(i) end
-                ImGui._activePopup = nil
-                ImGui._activePopupRect = nil
-                ImGui._activePopupCloseRequested = false
-                ui:setWindowContext(nil, false)
-                return
-            end
+            local it = items[i]
+            if type(it) == "table" and it.separator then
+                Theme.setColor(Theme.C.divider)
+                render.drawRectFast(px + 8, curY + 3, popW - 16, 1)
+                curY = curY + sepH
+            else
+                local label = type(it) == "table" and tostring(it.label or "") or tostring(it)
+                local shortcut = type(it) == "table" and it.shortcut or nil
+                local disabled = type(it) == "table" and it.disabled or false
+                local isSel = (not p.isContextMenu) and (i == p.selectedIdx)
+                local hot, cap = ui:hitTest(p.id .. "_opt_" .. i, px + 4, curY, popW - 8, itemH)
+                if disabled then hot = false end
 
-            if isSel then
-                Theme.drawRoundedRect(3, px + 4, iy, p.w - 8, itemH, Theme.C.bgSelectionRow)
-            elseif hot then
-                Theme.drawRoundedRect(3, px + 4, iy, p.w - 8, itemH, Theme.C.bgControlHover)
-            end
+                if hot and ui.leftPressed then
+                    ui:capture(p.id .. "_opt_" .. i)
+                end
+                if cap and ui.leftReleased and hot and not disabled then
+                    local cb = (type(it) == "table" and it.onPick) or p.onPick
+                    ImGui._activePopup = nil
+                    ImGui._activePopupRect = nil
+                    ImGui._activePopupCloseRequested = false
+                    ui:release(p.id .. "_opt_" .. i)
+                    ui:setWindowContext(nil, false)
+                    if cb then cb(i) end
+                    return
+                end
 
-            Theme.setFont(isSel and Theme.Fonts.BodyBold or Theme.Fonts.Body)
-            Theme.setColor(isSel and Theme.C.textPrimary or Theme.C.textSecondary)
-            render.drawSimpleText(px + 10, iy + itemH * 0.5, tostring(items[i]), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+                if isSel then
+                    Theme.drawRoundedRect(3, px + 4, curY, popW - 8, itemH, Theme.C.bgSelectionRow)
+                elseif hot then
+                    Theme.drawRoundedRect(3, px + 4, curY, popW - 8, itemH, Theme.C.bgControlHover)
+                end
+
+                Theme.setFont(isSel and Theme.Fonts.BodyBold or Theme.Fonts.Body)
+                Theme.setColor(disabled and Theme.C.textMuted or (isSel and Theme.C.textPrimary or Theme.C.textSecondary))
+                render.drawSimpleText(px + 10, curY + itemH * 0.5, label, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+                if shortcut and shortcut ~= "" then
+                    Theme.setFont(Theme.Fonts.Small)
+                    Theme.setColor(Theme.C.textMuted)
+                    render.drawSimpleText(px + popW - 10, curY + itemH * 0.5, tostring(shortcut), TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+                end
+                curY = curY + itemH
+            end
         end
 
         ui:setWindowContext(nil, false)
@@ -6115,7 +6771,7 @@ do (function(SOLACE)
         if not compactBar then
             Theme.setFont(Theme.Fonts.Small)
             Theme.setColor(Theme.C.textMuted)
-            render.drawSimpleText(cx, y + h * 0.5, "P3", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+            render.drawSimpleText(cx, y + h * 0.5, "P4", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
             cx = cx + 22
         end
 
@@ -6150,7 +6806,7 @@ do (function(SOLACE)
             cx = cx + 10
         end
 
-        -- Phase 2 Quick Actions: Focus Selected & Quick Spawn Cube
+        -- Quick Actions: Focus Selected, Duplicate & Quick Spawn Cube
         local focusW = compactBar and 58 or 68
         if cx + focusW <= maxLeftX then
             if Widgets.button(ui, "tb_focus", cx, by, focusW, btnH, "Focus", {
@@ -6161,6 +6817,17 @@ do (function(SOLACE)
                 actions.focusSelected()
             end
             cx = cx + focusW + 4
+        end
+
+        local dupW = compactBar and 44 or 52
+        if cx + dupW <= maxLeftX then
+            if Widgets.button(ui, "tb_dup", cx, by, dupW, btnH, "Dup", {
+                disabled = not actions.hasSelection,
+                tooltip = "Duplicate selected object(s) and hierarchies (Ctrl+D)",
+            }) then
+                if actions.duplicateSelected then actions.duplicateSelected() end
+            end
+            cx = cx + dupW + 4
         end
 
         local cubeW = compactBar and 62 or 72
@@ -6281,7 +6948,158 @@ do (function(SOLACE)
         _viewH = 0,
         _lastCount = -1,
         _countStr = "0 nodes",
+        _renamingId = nil,
+        _dragCandidate = nil,
+        _draggingId = nil,
+        _dragIds = nil,
     }
+
+    function Explorer.beginRename(ui, sceneGraph, id)
+        local node = sceneGraph and sceneGraph:getNode(id)
+        if not node or id == sceneGraph:getRootId() then return end
+        Explorer._renamingId = id
+        if ui then
+            ui._editBuffers["exp_rename_" .. id] = node.name
+            ui:focusTextInput("exp_rename_" .. id)
+        end
+    end
+
+    function Explorer.cancelDrag(ui)
+        Explorer._dragCandidate = nil
+        Explorer._draggingId = nil
+        Explorer._dragIds = nil
+        if ui then ui:release("exp_drag") end
+    end
+
+    local function collectMoveContainers(sceneGraph, dragIds)
+        local out = {}
+        local rootId = sceneGraph:getRootId()
+        local function walk(nid, depth)
+            local n = sceneGraph:getNode(nid)
+            if not n then return end
+            if sceneGraph:canAcceptChild(nid) then
+                local okAll = true
+                for i = 1, #dragIds do
+                    if not sceneGraph:canReparent(dragIds[i], nid) then
+                        okAll = false
+                        break
+                    end
+                end
+                if okAll then
+                    local prefix = depth > 0 and string.rep("  ", depth) or ""
+                    out[#out + 1] = {
+                        id = nid,
+                        label = (nid == rootId) and "Scene Root" or (prefix .. n.name .. " (" .. n.kind .. ")"),
+                    }
+                end
+            end
+            for i = 1, #n.children do
+                walk(n.children[i], depth + 1)
+            end
+        end
+        walk(rootId, 0)
+        return out
+    end
+
+    local function openExplorerContextMenu(ui, state, sceneGraph, actions, clickedNode, sx, sy)
+        if not SOLACE.ImGui or not SOLACE.ImGui.openContextMenu then return end
+        local rootId = sceneGraph:getRootId()
+        local topSel = sceneGraph:getTopLevelSelectedIds()
+        local hasNonRootSel = (#topSel > 0)
+        local singleNode = (#topSel == 1) and sceneGraph:getNode(topSel[1]) or nil
+        local targetContainer = rootId
+        if clickedNode and sceneGraph:canAcceptChild(clickedNode.id) then
+            targetContainer = clickedNode.id
+        elseif clickedNode and clickedNode.parentId then
+            targetContainer = clickedNode.parentId
+        end
+
+        local items = {}
+        if singleNode then
+            items[#items + 1] = {
+                label = "Rename",
+                onPick = function()
+                    Explorer.beginRename(ui, sceneGraph, singleNode.id)
+                end,
+            }
+        end
+
+        if hasNonRootSel then
+            items[#items + 1] = {
+                label = "Duplicate",
+                shortcut = "Ctrl+D",
+                onPick = function()
+                    if actions.duplicateSelected then actions.duplicateSelected() end
+                end,
+            }
+            items[#items + 1] = {
+                label = "Delete",
+                shortcut = "Del",
+                onPick = function()
+                    if actions.deleteSelected then actions.deleteSelected() end
+                end,
+            }
+            local visLabel = "Toggle Visibility"
+            if singleNode then
+                visLabel = singleNode.visible and "Hide" or "Show"
+            end
+            items[#items + 1] = {
+                label = visLabel,
+                onPick = function()
+                    if actions.toggleVisibility then
+                        actions.toggleVisibility(singleNode and singleNode.id or nil)
+                    end
+                end,
+            }
+            items[#items + 1] = { separator = true }
+            items[#items + 1] = {
+                label = "Group Selected",
+                onPick = function()
+                    if actions.groupSelected then actions.groupSelected() end
+                end,
+            }
+        end
+
+        items[#items + 1] = {
+            label = "Create Folder",
+            onPick = function()
+                if actions.spawnFolder then actions.spawnFolder(targetContainer) end
+            end,
+        }
+        items[#items + 1] = {
+            label = "Create Group",
+            onPick = function()
+                if actions.spawnGroup then actions.spawnGroup(targetContainer) end
+            end,
+        }
+
+        if hasNonRootSel then
+            local targets = collectMoveContainers(sceneGraph, topSel)
+            if #targets > 0 then
+                items[#items + 1] = { separator = true }
+                items[#items + 1] = {
+                    label = "Move into Group / Folder...",
+                    onPick = function()
+                        local moveItems = {}
+                        for i = 1, #targets do
+                            local tgt = targets[i]
+                            moveItems[#moveItems + 1] = {
+                                label = tgt.label,
+                                onPick = function()
+                                    if actions.reparentNodes then
+                                        actions.reparentNodes(topSel, tgt.id, nil)
+                                    end
+                                end,
+                            }
+                        end
+                        SOLACE.ImGui.openContextMenu("exp_move_menu", sx, sy, moveItems, 210)
+                    end,
+                }
+            end
+        end
+
+        SOLACE.ImGui.openContextMenu("exp_ctx_menu", sx, sy, items, 196)
+    end
 
     local KIND_ICONS = {
         [Constants.NODE_KINDS.ROOT]     = "scene",
@@ -6353,8 +7171,8 @@ do (function(SOLACE)
         local actY = by + 32
         local gap = 4
         local btnW = math.floor((bw - pad * 2 - gap * 3) / 4)
-        local selNode = sceneGraph:getSelectedNode()
-        local canDelete = (selNode ~= nil and selNode.id ~= sceneGraph:getRootId())
+        local topSel = sceneGraph:getTopLevelSelectedIds()
+        local canNonRoot = (#topSel > 0)
         local compactExp = (btnW < 52)
 
         if Widgets.button(ui, "exp_add_grp", bx + pad, actY, btnW, 20, compactExp and "+G" or "+Grp", {
@@ -6367,14 +7185,14 @@ do (function(SOLACE)
         }) then
             actions.spawnFolder()
         end
-        if Widgets.button(ui, "exp_focus", bx + pad + (btnW + gap) * 2, actY, btnW, 20, compactExp and "Foc" or "Focus", {
-            disabled = not canDelete,
-            tooltip = "Focus Freecam on selected object (F)",
+        if Widgets.button(ui, "exp_dup", bx + pad + (btnW + gap) * 2, actY, btnW, 20, "Dup", {
+            disabled = not canNonRoot,
+            tooltip = "Duplicate selected object(s) & hierarchies (Ctrl+D)",
         }) then
-            actions.focusSelected()
+            if actions.duplicateSelected then actions.duplicateSelected() end
         end
         if Widgets.button(ui, "exp_del", bx + pad + (btnW + gap) * 3, actY, btnW, 20, "Del", {
-            disabled = not canDelete,
+            disabled = not canNonRoot,
             tooltip = "Delete selected object(s) (Delete)",
         }) then
             actions.deleteSelected()
@@ -6383,14 +7201,43 @@ do (function(SOLACE)
         Theme.setColor(Theme.C.border)
         render.drawLine(bx, listY - 1, bx + bw, listY - 1)
 
+        -- Promote drag candidate once pointer moves >= 5px
+        if Explorer._dragCandidate then
+            if ui.leftDown then
+                local dist = math.abs(ui.mx - Explorer._dragCandidate.startX) + math.abs(ui.my - Explorer._dragCandidate.startY)
+                if dist >= 5 then
+                    local cid = Explorer._dragCandidate.id
+                    Explorer._draggingId = cid
+                    Explorer._dragCandidate = nil
+                    if sceneGraph:isSelected(cid) then
+                        Explorer._dragIds = sceneGraph:getTopLevelSelectedIds()
+                    else
+                        Explorer._dragIds = { cid }
+                    end
+                    if #Explorer._dragIds == 0 then
+                        Explorer.cancelDrag(ui)
+                    else
+                        ui:capture("exp_drag")
+                    end
+                end
+            else
+                Explorer._dragCandidate = nil
+            end
+        end
+
         -- Scrollable tree body
         ui:pushClip(bx, listY, bw, listH)
 
         local rows = sceneGraph:getFlatHierarchy(state.explorerSearch)
         local rowH = Theme.Metrics.rowH
         local primaryId = sceneGraph:getSelectedId()
+        local rootId = sceneGraph:getRootId()
         local curY = listY + 4 - Explorer._scrollY
         local startY = curY
+        local rightClickedNode = nil
+        local anyRowHovered = false
+
+        local dropInfo = nil -- { mode, parentId, insertIndex, drawY, valid, reason, targetName }
 
         for _, item in ipairs(rows) do
             local node = item.node
@@ -6404,6 +7251,7 @@ do (function(SOLACE)
                 local eyeX = bx + bw - eyeSize - (maxScroll > 0 and 14 or 6)
 
                 local hot, _ = ui:hitTest(rowId, bx + 2, curY, rowW, rowH)
+                if hot then anyRowHovered = true end
 
                 if isSel then
                     Theme.setColor(Theme.C.bgSelectionRow, isPrimary and 120 or 75)
@@ -6435,7 +7283,7 @@ do (function(SOLACE)
                 end
 
                 -- Visibility toggle eye button (non-root nodes)
-                if node.id ~= sceneGraph:getRootId() then
+                if node.id ~= rootId then
                     local eyeHot, _ = ui:hitTest("exp_eye_" .. node.id, eyeX, curY, eyeSize, rowH)
                     if eyeHot then
                         ui:setTooltip(node.visible and "Hide object" or "Show object")
@@ -6448,19 +7296,83 @@ do (function(SOLACE)
                         node.visible and (eyeHot and Theme.C.textPrimary or Theme.C.textSecondary) or Theme.C.textDisabled
                     )
                     if eyeHot and ui.leftPressed then
-                        sceneGraph:toggleNodeVisible(node.id)
+                        if actions.toggleVisibility then
+                            actions.toggleVisibility(node.id)
+                        else
+                            sceneGraph:toggleNodeVisible(node.id)
+                        end
                         handledClick = true
                     end
                 end
 
-                -- Row selection (supports Ctrl+Click multi-select)
-                if hot and ui.leftPressed and not handledClick then
+                -- Row selection & drag start
+                if hot and ui.leftPressed and not handledClick and Explorer._renamingId ~= node.id then
                     local ctrl = hasPermission("input") and input.isControlDown() or false
                     if ctrl then
                         sceneGraph:toggleSelectedId(node.id)
                     else
                         sceneGraph:setSelectedId(node.id)
+                        if node.id ~= rootId then
+                            Explorer._dragCandidate = { id = node.id, startX = ui.mx, startY = ui.my }
+                        end
                     end
+                end
+
+                -- Row right-click -> Context Menu
+                if hot and ui.rightPressed and ui:canInteractCurrentWindow() then
+                    if not sceneGraph:isSelected(node.id) then
+                        sceneGraph:setSelectedId(node.id)
+                    end
+                    rightClickedNode = node
+                end
+
+                -- Evaluate drag drop target over this row
+                if Explorer._draggingId and ui:pointInRect(bx + 2, curY, rowW, rowH) and ui:pointInRect(bx, listY, bw, listH) then
+                    local relY = ui.my - curY
+                    local isContainer = sceneGraph:canAcceptChild(node.id)
+                    local mode, targetParentId, insertIdx, drawY
+                    if node.id == rootId then
+                        mode = "into"
+                        targetParentId = rootId
+                        insertIdx = #node.children + 1
+                        drawY = curY
+                    elseif isContainer and relY >= 4 and relY <= rowH - 4 then
+                        mode = "into"
+                        targetParentId = node.id
+                        insertIdx = #node.children + 1
+                        drawY = curY
+                    elseif relY < rowH * 0.5 then
+                        mode = "before"
+                        targetParentId = node.parentId
+                        insertIdx = sceneGraph:getChildIndex(node.parentId, node.id) or 1
+                        drawY = curY
+                    else
+                        mode = "after"
+                        targetParentId = node.parentId
+                        insertIdx = (sceneGraph:getChildIndex(node.parentId, node.id) or 0) + 1
+                        drawY = curY + rowH
+                    end
+
+                    local okAll, reason = true, nil
+                    for i = 1, #(Explorer._dragIds or {}) do
+                        local ok, r = sceneGraph:canReparent(Explorer._dragIds[i], targetParentId)
+                        if not ok then
+                            okAll = false
+                            reason = r
+                            break
+                        end
+                    end
+                    local pNode = sceneGraph:getNode(targetParentId)
+                    dropInfo = {
+                        mode = mode,
+                        parentId = targetParentId,
+                        insertIndex = insertIdx,
+                        drawY = drawY,
+                        rowW = rowW,
+                        valid = okAll,
+                        reason = reason,
+                        targetName = pNode and pNode.name or "Root",
+                    }
                 end
 
                 local iconX = bx + indent + 15
@@ -6475,17 +7387,111 @@ do (function(SOLACE)
                     textAlpha
                 )
 
-                Theme.setFont(isSel and Theme.Fonts.BodyBold or Theme.Fonts.Body)
-                Theme.setColor(isSel and Theme.C.textPrimary or Theme.C.textSecondary, textAlpha)
-                render.drawSimpleText(iconX + 18, curY + rowH * 0.5, node.name, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+                if Explorer._renamingId == node.id then
+                    local editW = math.max(50, eyeX - (iconX + 18) - 4)
+                    Widgets.editField(ui, "exp_rename_" .. node.id, iconX + 16, curY + 1, editW, rowH - 2, node.name, node.name, {
+                        mono = false,
+                        onCommit = function(v)
+                            Explorer._renamingId = nil
+                            if actions.renameNode then
+                                actions.renameNode(node.id, v)
+                            else
+                                sceneGraph:renameNode(node.id, v)
+                            end
+                        end,
+                        onCancel = function()
+                            Explorer._renamingId = nil
+                        end,
+                    })
+                else
+                    Theme.setFont(isSel and Theme.Fonts.BodyBold or Theme.Fonts.Body)
+                    Theme.setColor(isSel and Theme.C.textPrimary or Theme.C.textSecondary, textAlpha)
+                    render.drawSimpleText(iconX + 18, curY + rowH * 0.5, node.name, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
 
-                if eyeX - (iconX + 18) >= 128 then
-                    Theme.setFont(Theme.Fonts.Small)
-                    Theme.setColor(Theme.C.textMuted, textAlpha)
-                    render.drawSimpleText(eyeX - 6, curY + rowH * 0.5, node.kind, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+                    if eyeX - (iconX + 18) >= 128 then
+                        Theme.setFont(Theme.Fonts.Small)
+                        Theme.setColor(Theme.C.textMuted, textAlpha)
+                        render.drawSimpleText(eyeX - 6, curY + rowH * 0.5, node.kind, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+                    end
                 end
             end
             curY = curY + rowH
+        end
+
+        -- Empty area below rows in Explorer: allow dropping into Scene Root or right-click menu
+        if Explorer._draggingId and not dropInfo and ui:pointInRect(bx, listY, bw, listH) then
+            local rootNode = sceneGraph:getNode(rootId)
+            local okAll, reason = true, nil
+            for i = 1, #(Explorer._dragIds or {}) do
+                local ok, r = sceneGraph:canReparent(Explorer._dragIds[i], rootId)
+                if not ok then
+                    okAll = false
+                    reason = r
+                    break
+                end
+            end
+            dropInfo = {
+                mode = "into",
+                parentId = rootId,
+                insertIndex = rootNode and (#rootNode.children + 1) or 1,
+                drawY = math.min(curY, listY + listH - rowH),
+                rowW = bw - 8,
+                valid = okAll,
+                reason = reason,
+                targetName = rootNode and rootNode.name or "Scene Root",
+            }
+        end
+
+        if rightClickedNode then
+            local sx = ui.mx + (ui._rtOffsetX or 0)
+            local sy = ui.my + (ui._rtOffsetY or 0)
+            openExplorerContextMenu(ui, state, sceneGraph, actions, rightClickedNode, sx, sy)
+        elseif not anyRowHovered and ui.rightPressed and ui:pointInRect(bx, listY, bw, listH) and ui:canInteractCurrentWindow() then
+            local sx = ui.mx + (ui._rtOffsetX or 0)
+            local sy = ui.my + (ui._rtOffsetY or 0)
+            openExplorerContextMenu(ui, state, sceneGraph, actions, nil, sx, sy)
+        end
+
+        -- Visual drop indicator + drag ghost pill
+        if Explorer._draggingId then
+            if dropInfo then
+                local col = dropInfo.valid and Theme.C.accentBright or Theme.C.danger
+                if dropInfo.mode == "into" then
+                    Theme.setColor(col, 38)
+                    render.drawRectFast(bx + 2, dropInfo.drawY, dropInfo.rowW, rowH)
+                    Theme.setColor(col, 230)
+                    render.drawRectOutline(bx + 2, dropInfo.drawY, dropInfo.rowW, rowH, 1)
+                else
+                    Theme.setColor(col, 240)
+                    render.drawRectFast(bx + 6, dropInfo.drawY - 1, dropInfo.rowW - 6, 2)
+                    render.drawRectFast(bx + 4, dropInfo.drawY - 3, 5, 6)
+                end
+            end
+
+            -- Floating drag label inside Explorer
+            local dragCount = #(Explorer._dragIds or {})
+            local dNode = sceneGraph:getNode(Explorer._draggingId)
+            local label = dragCount > 1 and (dragCount .. " nodes") or (dNode and dNode.name or "Node")
+            if dropInfo then
+                label = dropInfo.valid and (label .. " -> " .. dropInfo.targetName) or (dropInfo.reason or "Invalid parent")
+            end
+            Theme.setFont(Theme.Fonts.Small)
+            local lw = (render.getTextSize(label) or 80) + 14
+            local gx = math.clamp(ui.mx + 12, bx + 4, bx + bw - lw - 4)
+            local gy = math.clamp(ui.my + 8, listY + 2, listY + listH - 20)
+            Theme.drawRoundedRect(3, gx, gy, lw, 18, Theme.C.bgPopup, 235)
+            Theme.setColor((dropInfo and not dropInfo.valid) and Theme.C.danger or Theme.C.accentBright)
+            render.drawRectOutline(gx, gy, lw, 18, 1)
+            Theme.setColor(Theme.C.textPrimary)
+            render.drawSimpleText(gx + 7, gy + 9, label, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+            if ui.leftReleased then
+                local dragIds = Explorer._dragIds
+                Explorer.cancelDrag(ui)
+                if dragIds and dropInfo and dropInfo.valid and actions.reparentNodes then
+                    actions.reparentNodes(dragIds, dropInfo.parentId, dropInfo.insertIndex)
+                end
+            end
         end
 
         Explorer._contentH = (curY - startY) + 8
@@ -6515,6 +7521,8 @@ do (function(SOLACE)
         _selCountLast = -1,
         _selCountLabel = "0 selected",
         _xformCache = {},
+        _matError = nil,
+        _matErrorNodeId = nil,
         _rtCacheTime = -1,
         _rtCpuStr = "",
         _rtRamStr = "",
@@ -6523,15 +7531,73 @@ do (function(SOLACE)
         _rtHoloPerm = false,
     }
 
-    local function fmtVecCached(cache, key, v, dec)
-        local x, y, z = v[1], v[2], v[3]
-        local c = cache[key]
-        if c and c.x == x and c.y == y and c.z == z and c.dec == dec then
-            return c.str
+    function Properties.parseNumber(raw)
+        if type(raw) == "number" then
+            if raw ~= raw or math.abs(raw) == math.huge then return nil end
+            return raw
         end
-        local str = Utils.fmtVec3(v, dec)
-        cache[key] = { x = x, y = y, z = z, dec = dec, str = str }
-        return str
+        if type(raw) ~= "string" then return nil end
+        local s = string.trim(raw)
+        if s == "" then return nil end
+        local low = string.lower(s)
+        if string.find(low, "nan", 1, true) or string.find(low, "inf", 1, true) then
+            return nil
+        end
+        local n = tonumber(s)
+        if not n or n ~= n or math.abs(n) == math.huge then
+            return nil
+        end
+        return n
+    end
+
+    function Properties.validateMaterialPath(rawPath)
+        local clean = string.trim(tostring(rawPath or ""))
+        if clean == "" then
+            return true, ""
+        end
+        if #clean > 260 then
+            return false, "Material path too long"
+        end
+        if string.sub(string.lower(clean), -4) == ".vmt" then
+            return false, "Omit .vmt extension (Starfall material.load)"
+        end
+        if string.sub(clean, 1, 1) ~= "!" and material and material.load and hasPermission("material.load") then
+            local ok, matOrErr = pcall(material.load, clean)
+            if not ok or not matOrErr then
+                return false, "Invalid or missing material"
+            end
+        end
+        return true, clean
+    end
+
+    local function drawVec3EditRow(ui, idPrefix, x, y, w, h, label, vec, dec, axesLabels, axesCols, onAxisCommit, tip)
+        Theme.setFont(Theme.Fonts.Small)
+        Theme.setColor(Theme.C.textSecondary)
+        render.drawSimpleText(x, y + 7, label, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        local fy = y + 15
+        local gap = 4
+        local fw = math.floor((w - gap * 2) / 3)
+        local fmt = "%." .. tostring(dec) .. "f"
+        for i = 1, 3 do
+            local fx = x + (i - 1) * (fw + gap)
+            local boxW = (i == 3) and (w - (fw + gap) * 2) or fw
+            local val = vec[i] or 0
+            local disp = string.format(fmt, val)
+            local raw = tostring(math.round(val, 3))
+            Widgets.editField(ui, idPrefix .. "_" .. i, fx, fy, boxW, h, disp, raw, {
+                prefix = axesLabels[i],
+                barColor = axesCols[i],
+                tooltip = tip,
+                onCommit = function(str)
+                    local n = Properties.parseNumber(str)
+                    if n ~= nil and onAxisCommit then
+                        onAxisCommit(i, n)
+                    end
+                end,
+            })
+        end
+        return 15 + h + 5
     end
 
     function Properties.draw(ui, state, sceneGraph, runtime, camera, rect, actions, opts)
@@ -6539,6 +7605,11 @@ do (function(SOLACE)
 
         local sel = sceneGraph:getSelectedNode()
         local selCount = #sceneGraph:getSelectedIds()
+        if Properties._matErrorNodeId ~= (sel and sel.id or nil) then
+            Properties._matError = nil
+            Properties._matErrorNodeId = sel and sel.id or nil
+        end
+
         local rightLabel
         if selCount > 1 then
             if selCount ~= Properties._selCountLast then
@@ -6593,23 +7664,19 @@ do (function(SOLACE)
                 local isRoot = (sel.id == sceneGraph:getRootId())
 
                 if not isRoot then
-                    local nameGetter = function() return sel.name end
-                    local nameSetter = function(v) sceneGraph:renameNode(sel.id, v) end
                     if curY + 22 >= by and curY <= visBottom then
-                        Widgets.textBox(
-                            ui,
-                            "prop_node_name_" .. sel.id,
-                            bx + pad,
-                            curY,
-                            innerW,
-                            22,
-                            nameGetter,
-                            nameSetter,
-                            "Object name...",
-                            "Rename selected object"
-                        )
-                    else
-                        ui:registerTextInput("prop_node_name_" .. sel.id, nameGetter, nameSetter)
+                        Widgets.editField(ui, "prop_node_name_" .. sel.id, bx + pad, curY, innerW, 22, sel.name, sel.name, {
+                            mono = false,
+                            placeholder = "Object name...",
+                            tooltip = "Rename selected object (Enter to commit, Esc to cancel)",
+                            onCommit = function(v)
+                                if actions.renameNode then
+                                    actions.renameNode(sel.id, v)
+                                else
+                                    sceneGraph:renameNode(sel.id, v)
+                                end
+                            end,
+                        })
                     end
                     curY = curY + 26
                 end
@@ -6621,40 +7688,9 @@ do (function(SOLACE)
                 if curY + 18 >= by and curY <= visBottom then
                     Widgets.keyValueRow(bx + pad, curY, innerW, 18, "IR ID", sel.id, Theme.C.textMuted)
                 end
-                curY = curY + 19
-
-                if sel.appearance.model and sel.appearance.model ~= "" then
-                    if curY + 18 >= by and curY <= visBottom then
-                        local shortMdl = string.getFileFromFilename(sel.appearance.model) or sel.appearance.model
-                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Model", shortMdl, Theme.C.textSecondary)
-                    end
-                    curY = curY + 19
-                elseif sel.appearance.material and sel.appearance.material ~= "" then
-                    if curY + 18 >= by and curY <= visBottom then
-                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Material", sel.appearance.material, Theme.C.textSecondary)
-                    end
-                    curY = curY + 19
-                end
+                curY = curY + 22
 
                 if not isRoot then
-                    local xc = Properties._xformCache
-                    if xc._id ~= sel.id then
-                        Properties._xformCache = { _id = sel.id }
-                        xc = Properties._xformCache
-                    end
-                    if curY + 18 >= by and curY <= visBottom then
-                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Position", fmtVecCached(xc, "pos", sel.transform.pos, 1))
-                    end
-                    curY = curY + 19
-                    if curY + 18 >= by and curY <= visBottom then
-                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Rotation", fmtVecCached(xc, "ang", sel.transform.ang, 1))
-                    end
-                    curY = curY + 19
-                    if curY + 18 >= by and curY <= visBottom then
-                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Scale", fmtVecCached(xc, "scale", sel.transform.scale, 2))
-                    end
-                    curY = curY + 22
-
                     local entry = runtime:getEntry(sel.id)
                     if entry and entry.errorMsg then
                         if curY + 18 >= by and curY <= visBottom then
@@ -6665,11 +7701,10 @@ do (function(SOLACE)
 
                     if curY + rowH >= by and curY <= visBottom then
                         local thirdW = math.floor((innerW - 8) / 3)
-                        if Widgets.button(ui, "prop_vis", bx + pad, curY, thirdW, rowH, sel.visible and "Visible" or "Hidden", {
-                            active = sel.visible,
-                            tooltip = "Toggle object visibility",
+                        if Widgets.button(ui, "prop_dup", bx + pad, curY, thirdW, rowH, "Dup", {
+                            tooltip = "Duplicate selected object(s) (Ctrl+D)",
                         }) then
-                            sceneGraph:toggleNodeVisible(sel.id)
+                            if actions.duplicateSelected then actions.duplicateSelected() end
                         end
                         if Widgets.button(ui, "prop_focus", bx + pad + thirdW + 4, curY, thirdW, rowH, "Focus", {
                             tooltip = "Move Freecam to frame this object (F)",
@@ -6705,24 +7740,206 @@ do (function(SOLACE)
                             if actions.setTool then actions.setTool("scale") else state.activeTool = "scale" end
                         end
                     end
-                    curY = curY + rowH + 6
+                    curY = curY + rowH + 8
                 end
-
-                local nh = 64
-                if curY + nh >= by and curY <= visBottom then
-                    nh = Widgets.phaseNotice(
-                        bx + pad, curY, innerW,
-                        "Numeric Transforms",
-                        { "Use 3D Move/Rotate/Scale gizmos;", "numeric edit boxes arrive in Phase 4." },
-                        "Phase 4"
-                    )
-                end
-                curY = curY + nh + 8
             else
                 if curY + 18 >= by and curY <= visBottom then
                     Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Selection", "None (Click object in viewport)", Theme.C.textMuted)
                 end
                 curY = curY + 24
+            end
+        end
+
+        -- 2. Numeric Transform Editors (non-root selection)
+        if sel and sel.id ~= sceneGraph:getRootId() then
+            if curY + 22 >= by and curY <= visBottom then
+                state.sections.transform = Widgets.sectionHeader(ui, "sec_transform", bx, curY, headerW, 22, "Transform", state.sections.transform)
+            end
+            curY = curY + 26
+            if state.sections.transform then
+                local axisCols = { Theme.C.axisX, Theme.C.axisY, Theme.C.axisZ }
+                local fieldH = 21
+
+                local posRowH = 15 + fieldH + 5
+                if curY + posRowH >= by and curY <= visBottom then
+                    drawVec3EditRow(
+                        ui, "prop_num_pos_" .. sel.id, bx + pad, curY, innerW, fieldH,
+                        "Position (Local)", sel.transform.pos, 2, { "X", "Y", "Z" }, axisCols,
+                        function(idx, n)
+                            if actions.setNodeTransformAxis then
+                                actions.setNodeTransformAxis(sel.id, "pos", idx, n)
+                            end
+                        end,
+                        "Edit Position X/Y/Z (Enter/blur commits, Esc cancels)"
+                    )
+                end
+                curY = curY + posRowH
+
+                local rotRowH = 15 + fieldH + 5
+                if curY + rotRowH >= by and curY <= visBottom then
+                    drawVec3EditRow(
+                        ui, "prop_num_ang_" .. sel.id, bx + pad, curY, innerW, fieldH,
+                        "Rotation (Pitch / Yaw / Roll)", sel.transform.ang, 1, { "P", "Y", "R" }, axisCols,
+                        function(idx, n)
+                            if actions.setNodeTransformAxis then
+                                actions.setNodeTransformAxis(sel.id, "ang", idx, n)
+                            end
+                        end,
+                        "Edit Rotation Pitch/Yaw/Roll in degrees (Enter/blur commits)"
+                    )
+                end
+                curY = curY + rotRowH
+
+                local sclRowH = 15 + fieldH + 5
+                if curY + sclRowH >= by and curY <= visBottom then
+                    drawVec3EditRow(
+                        ui, "prop_num_scl_" .. sel.id, bx + pad, curY, innerW, fieldH,
+                        string.format("Scale (%.2f .. %.0f)", Constants.MIN_SCALE, Constants.MAX_SCALE),
+                        sel.transform.scale, 2, { "X", "Y", "Z" }, axisCols,
+                        function(idx, n)
+                            if actions.setNodeTransformAxis then
+                                actions.setNodeTransformAxis(sel.id, "scale", idx, n)
+                            end
+                        end,
+                        string.format("Edit Scale X/Y/Z (clamped %.2f - %.0f)", Constants.MIN_SCALE, Constants.MAX_SCALE)
+                    )
+                end
+                curY = curY + sclRowH + 4
+            end
+
+            -- 3. Appearance & Model Info
+            if curY + 22 >= by and curY <= visBottom then
+                state.sections.appearance = Widgets.sectionHeader(ui, "sec_appearance", bx, curY, headerW, 22, "Appearance & Info", state.sections.appearance)
+            end
+            curY = curY + 26
+            if state.sections.appearance then
+                -- Visibility toggle
+                if curY + rowH >= by and curY <= visBottom then
+                    if Widgets.button(ui, "prop_vis", bx + pad, curY, innerW, rowH, sel.visible and "Visible: ON" or "Visible: OFF", {
+                        icon = "eye",
+                        active = sel.visible,
+                        tooltip = "Toggle node visibility (Undoable)",
+                    }) then
+                        if actions.toggleVisibility then
+                            actions.toggleVisibility(sel.id)
+                        else
+                            sceneGraph:toggleNodeVisible(sel.id)
+                        end
+                    end
+                end
+                curY = curY + rowH + 6
+
+                -- Color RGBA editor (swatch + R, G, B, A boxes)
+                local col = sel.appearance.color or { 255, 255, 255, 255 }
+                if curY + 38 >= by and curY <= visBottom then
+                    Theme.setFont(Theme.Fonts.Small)
+                    Theme.setColor(Theme.C.textSecondary)
+                    render.drawSimpleText(bx + pad, curY + 7, "Color (RGBA 0-255)", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+                    local fy = curY + 15
+                    local swW = 20
+                    Theme.setColor(Color(col[1] or 255, col[2] or 255, col[3] or 255, col[4] or 255))
+                    render.drawRectFast(bx + pad, fy, swW, 21)
+                    Theme.setColor(Theme.C.borderLight)
+                    render.drawRectOutline(bx + pad, fy, swW, 21, 1)
+
+                    local chanX = bx + pad + swW + 4
+                    local chanAreaW = innerW - swW - 4
+                    local gap = 3
+                    local cw = math.floor((chanAreaW - gap * 3) / 4)
+                    local chanNames = { "R", "G", "B", "A" }
+                    local chanCols = { Theme.C.axisX, Theme.C.axisY, Theme.C.axisZ, Theme.C.textSecondary }
+                    for i = 1, 4 do
+                        local fx = chanX + (i - 1) * (cw + gap)
+                        local bw2 = (i == 4) and (chanAreaW - (cw + gap) * 3) or cw
+                        local cv = math.clamp(math.floor((col[i] or 255) + 0.5), 0, 255)
+                        Widgets.editField(ui, "prop_col_" .. i .. "_" .. sel.id, fx, fy, bw2, 21, tostring(cv), tostring(cv), {
+                            prefix = chanNames[i],
+                            barColor = chanCols[i],
+                            tooltip = "Edit color " .. chanNames[i] .. " channel (0-255)",
+                            onCommit = function(str)
+                                local n = Properties.parseNumber(str)
+                                if n ~= nil and actions.setNodeColorChannel then
+                                    actions.setNodeColorChannel(sel.id, i, math.clamp(math.floor(n + 0.5), 0, 255))
+                                end
+                            end,
+                        })
+                    end
+                end
+                curY = curY + 41
+
+                -- Material override input + Clear button
+                if curY + 38 >= by and curY <= visBottom then
+                    Theme.setFont(Theme.Fonts.Small)
+                    Theme.setColor(Theme.C.textSecondary)
+                    render.drawSimpleText(bx + pad, curY + 7, "Material Override", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+                    local fy = curY + 15
+                    local clrW = 36
+                    local matW = math.max(60, innerW - clrW - 4)
+                    local matVal = sel.appearance.material or ""
+                    Widgets.editField(ui, "prop_mat_" .. sel.id, bx + pad, fy, matW, 21, matVal, matVal, {
+                        placeholder = "(default material)",
+                        tooltip = "Material path (no .vmt; empty restores default)",
+                        onCommit = function(str)
+                            if actions.setNodeMaterial then
+                                local ok, err = actions.setNodeMaterial(sel.id, str)
+                                if ok then
+                                    Properties._matError = nil
+                                    Properties._matErrorNodeId = sel.id
+                                else
+                                    Properties._matError = err or "Invalid material"
+                                    Properties._matErrorNodeId = sel.id
+                                end
+                            end
+                        end,
+                    })
+                    if Widgets.button(ui, "prop_mat_clr_" .. sel.id, bx + pad + matW + 4, fy, clrW, 21, "Clr", {
+                        disabled = (matVal == ""),
+                        tooltip = "Clear material override and restore default",
+                    }) then
+                        if actions.setNodeMaterial then
+                            actions.setNodeMaterial(sel.id, "")
+                            Properties._matError = nil
+                        end
+                    end
+                end
+                curY = curY + 40
+
+                if Properties._matError and Properties._matErrorNodeId == sel.id then
+                    if curY + 16 >= by and curY <= visBottom then
+                        Theme.setFont(Theme.Fonts.Small)
+                        Theme.setColor(Theme.C.danger)
+                        render.drawSimpleText(bx + pad, curY + 7, Properties._matError, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+                    end
+                    curY = curY + 17
+                end
+
+                -- Model Info display
+                if sel.appearance.model and sel.appearance.model ~= "" then
+                    local shortMdl = string.getFileFromFilename(sel.appearance.model) or sel.appearance.model
+                    if curY + 18 >= by and curY <= visBottom then
+                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Model", shortMdl, Theme.C.textPrimary)
+                    end
+                    curY = curY + 19
+
+                    local exists = game and game.modelExists and game.modelExists(sel.appearance.model)
+                    if curY + 18 >= by and curY <= visBottom then
+                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Asset", exists and "Mounted" or "Not mounted", exists and Theme.C.success or Theme.C.warning)
+                    end
+                    curY = curY + 19
+
+                    local entry = runtime:getEntry(sel.id)
+                    if entry and entry.baseMin and entry.baseMax then
+                        local bSize = entry.baseMax - entry.baseMin
+                        if curY + 18 >= by and curY <= visBottom then
+                            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Bounds",
+                                string.format("%.0f x %.0f x %.0f", bSize[1], bSize[2], bSize[3]), Theme.C.textMuted)
+                        end
+                        curY = curY + 19
+                    end
+                end
+                curY = curY + 6
             end
         end
 
@@ -7985,6 +9202,8 @@ end)(SOLACE) end
 -- ============================================================================
 do (function(SOLACE)
     local Constants    = SOLACE.Constants
+    local IR           = SOLACE.IR
+    local Math3D       = SOLACE.Math3D
     local Events       = SOLACE.Events
     local Commands     = SOLACE.Commands
     local SceneGraph   = SOLACE.SceneGraph
@@ -8299,30 +9518,370 @@ do (function(SOLACE)
         sceneGraph:setSelectedId(node.id)
     end
 
-    function actions.spawnGroup()
-        local posTbl = camera:getSpawnTransform(state.spawnDistance)
-        local parentId = getTargetContainerParentId()
-        local node = sceneGraph:createGroup("Group", posTbl, parentId)
-        sceneGraph:setSelectedId(node.id)
+    local function cloneTransformSnap(t)
+        return {
+            pos = IR.cloneVec3(t.pos),
+            ang = IR.cloneVec3(t.ang),
+            scale = IR.cloneVec3(t.scale),
+            pivot = IR.cloneVec3(t.pivot),
+        }
     end
 
-    function actions.spawnFolder()
-        local parentId = getTargetContainerParentId()
-        local node = sceneGraph:createFolder("Folder", parentId)
-        sceneGraph:setSelectedId(node.id)
+    local function copyList(tbl)
+        local out = {}
+        for i = 1, #tbl do out[i] = tbl[i] end
+        return out
+    end
+
+    function actions.spawnGroup(parentOverride)
+        local posTbl = camera:getSpawnTransform(state.spawnDistance)
+        local parentId = parentOverride or getTargetContainerParentId()
+        if not sceneGraph:canAcceptChild(parentId) then parentId = sceneGraph:getRootId() end
+        local snap = sceneGraph:buildNodeSnapshot(Constants.NODE_KINDS.GROUP, "Group", posTbl, { 0, 0, 0 })
+        local prevSel = copyList(sceneGraph:getSelectedIds())
+        local prevPrim = sceneGraph:getSelectedId()
+        return commands:execute(Commands.createAddNodeCommand(sceneGraph, "Create Group", snap, parentId, nil, prevSel, prevPrim))
+    end
+
+    function actions.spawnFolder(parentOverride)
+        local parentId = parentOverride or getTargetContainerParentId()
+        if not sceneGraph:canAcceptChild(parentId) then parentId = sceneGraph:getRootId() end
+        local snap = sceneGraph:buildNodeSnapshot(Constants.NODE_KINDS.FOLDER, "Folder", { 0, 0, 0 }, { 0, 0, 0 })
+        local prevSel = copyList(sceneGraph:getSelectedIds())
+        local prevPrim = sceneGraph:getSelectedId()
+        return commands:execute(Commands.createAddNodeCommand(sceneGraph, "Create Folder", snap, parentId, nil, prevSel, prevPrim))
     end
 
     function actions.deleteSelected()
-        local ids = {}
-        for _, id in ipairs(sceneGraph:getSelectedIds()) do
-            if id ~= sceneGraph:getRootId() then
-                ids[#ids + 1] = id
+        local ids = sceneGraph:getTopLevelSelectedIds()
+        if #ids == 0 then return false end
+        local prevSel = copyList(sceneGraph:getSelectedIds())
+        local prevPrim = sceneGraph:getSelectedId()
+
+        local specs = {}
+        for i = 1, #ids do
+            local id = ids[i]
+            local node = sceneGraph:getNode(id)
+            if node and id ~= sceneGraph:getRootId() then
+                local pId = node.parentId or sceneGraph:getRootId()
+                specs[#specs + 1] = {
+                    rootId = id,
+                    parentId = pId,
+                    index = sceneGraph:getChildIndex(pId, id) or 1,
+                    snapshot = sceneGraph:cloneSubtreeSnapshot(id, true),
+                }
             end
         end
-        for _, id in ipairs(ids) do
-            sceneGraph:removeNode(id)
-        end
+        if #specs == 0 then return false end
+        table.sort(specs, function(a, b) return a.index < b.index end)
+        return commands:execute(Commands.createDeleteCommand(sceneGraph, #specs > 1 and "Delete (" .. #specs .. ")" or "Delete", specs, prevSel, prevPrim))
     end
+
+    function actions.duplicateSelected()
+        local ids = sceneGraph:getTopLevelSelectedIds()
+        if #ids == 0 then return false end
+        local prevSel = copyList(sceneGraph:getSelectedIds())
+        local prevPrim = sceneGraph:getSelectedId()
+        local off = state.duplicateOffset or Constants.DUPLICATE_OFFSET or { 16, 16, 0 }
+        local wOff = Vector(off[1] or 16, off[2] or 16, off[3] or 0)
+
+        local specs = {}
+        for i = 1, #ids do
+            local id = ids[i]
+            local src = sceneGraph:getNode(id)
+            if src and id ~= sceneGraph:getRootId() then
+                local pId = src.parentId or sceneGraph:getRootId()
+                local pNode = sceneGraph:getNode(pId)
+                local snap = sceneGraph:cloneSubtreeSnapshot(id, false, " (Copy)")
+                if snap and snap.root then
+                    if snap.root.kind ~= Constants.NODE_KINDS.FOLDER and snap.root.transform then
+                        local invRot = Math3D.getParentInverseRotation(sceneGraph, pId)
+                        local localOff = Math3D.worldDeltaToParentLocal(invRot, wOff)
+                        local pos = snap.root.transform.pos
+                        pos[1] = math.round(pos[1] + localOff[1], 3)
+                        pos[2] = math.round(pos[2] + localOff[2], 3)
+                        pos[3] = math.round(pos[3] + localOff[3], 3)
+                    end
+                    local idx = sceneGraph:getChildIndex(pId, id)
+                    specs[#specs + 1] = {
+                        parentId = pId,
+                        rootId = snap.root.id,
+                        snapshot = snap,
+                        insertIndex = idx and (idx + 1) or (pNode and (#pNode.children + 1) or 1),
+                    }
+                end
+            end
+        end
+        if #specs == 0 then return false end
+        return commands:execute(Commands.createDuplicateCommand(sceneGraph, #specs > 1 and "Duplicate (" .. #specs .. ")" or "Duplicate", specs, prevSel, prevPrim))
+    end
+
+    function actions.reparentNodes(nodeIds, targetParentId, insertIndex)
+        if not nodeIds or #nodeIds == 0 or not targetParentId then return false end
+        if not sceneGraph:canAcceptChild(targetParentId) then return false end
+        local prevSel = copyList(sceneGraph:getSelectedIds())
+        local prevPrim = sceneGraph:getSelectedId()
+        local targetParent = sceneGraph:getNode(targetParentId)
+        if not targetParent then return false end
+
+        -- Keep only valid non-root nodes not descending from another node in nodeIds
+        local idSet = {}
+        for i = 1, #nodeIds do idSet[nodeIds[i]] = true end
+
+        local entries = {}
+        local baseIdx = insertIndex or (#targetParent.children + 1)
+        local anyChanged = false
+        for i = 1, #nodeIds do
+            local id = nodeIds[i]
+            local node = sceneGraph:getNode(id)
+            if node and id ~= sceneGraph:getRootId() then
+                local skipAnc = false
+                local cur = node.parentId and sceneGraph:getNode(node.parentId) or nil
+                while cur and cur.id ~= sceneGraph:getRootId() do
+                    if idSet[cur.id] then skipAnc = true; break end
+                    cur = cur.parentId and sceneGraph:getNode(cur.parentId) or nil
+                end
+                if not skipAnc and sceneGraph:canReparent(id, targetParentId) then
+                    local oldP = node.parentId
+                    local oldIdx = sceneGraph:getChildIndex(oldP, id) or 1
+                    local reqIdx = baseIdx + #entries
+                    local effIdx = reqIdx
+                    if oldP == targetParentId and oldIdx < reqIdx then
+                        effIdx = effIdx - 1
+                    end
+                    effIdx = math.clamp(effIdx, 1, #targetParent.children + (oldP == targetParentId and 0 or 1))
+                    if oldP ~= targetParentId or oldIdx ~= effIdx then
+                        anyChanged = true
+                    end
+
+                    local wPos, wAng, wScale = Math3D.computeWorldTransform(sceneGraph, id)
+                    local lPos, lAng, lScale = Math3D.worldTransformToParentLocal(sceneGraph, targetParentId, wPos, wAng, wScale)
+                    entries[#entries + 1] = {
+                        id = id,
+                        oldParentId = oldP,
+                        oldIndex = oldIdx,
+                        oldTransform = cloneTransformSnap(node.transform),
+                        newParentId = targetParentId,
+                        newIndex = reqIdx,
+                        newTransform = {
+                            pos = lPos,
+                            ang = lAng,
+                            scale = lScale,
+                            pivot = IR.cloneVec3(node.transform.pivot),
+                        },
+                    }
+                end
+            end
+        end
+
+        if #entries == 0 or not anyChanged then return false end
+        return commands:execute(Commands.createReparentCommand(sceneGraph, "Reparent", entries, prevSel, prevPrim))
+    end
+
+    function actions.groupSelected()
+        local ids = sceneGraph:getTopLevelSelectedIds()
+        if #ids == 0 then return false end
+        local prevSel = copyList(sceneGraph:getSelectedIds())
+        local prevPrim = sceneGraph:getSelectedId()
+
+        local primary = sceneGraph:getSelectedNode()
+        local firstNode = sceneGraph:getNode(ids[1])
+        local groupParentId = (primary and primary.parentId) or (firstNode and firstNode.parentId) or sceneGraph:getRootId()
+        if not sceneGraph:canAcceptChild(groupParentId) then
+            groupParentId = sceneGraph:getRootId()
+        end
+
+        -- Place the new Group at the average world position of selected nodes
+        local sumPos = Vector(0, 0, 0)
+        local count = 0
+        local worldCache = {}
+        for i = 1, #ids do
+            local id = ids[i]
+            local wPos, wAng, wScale = Math3D.computeWorldTransform(sceneGraph, id)
+            worldCache[id] = { wPos = wPos, wAng = wAng, wScale = wScale }
+            sumPos = sumPos + wPos
+            count = count + 1
+        end
+        local avgWPos = (count > 0) and (sumPos / count) or Vector(0, 0, 0)
+        local grpLocalPos = Math3D.worldTransformToParentLocal(sceneGraph, groupParentId, avgWPos, Angle(0, 0, 0), Vector(1, 1, 1))
+        local groupSnap = sceneGraph:buildNodeSnapshot(Constants.NODE_KINDS.GROUP, "Group", grpLocalPos, { 0, 0, 0 })
+
+        -- Compute Group's world frame directly so child local transforms preserve world transforms
+        local rootId = sceneGraph:getRootId()
+        local grpWPos, grpWAng, grpWScale
+        if groupParentId == rootId then
+            grpWPos = Vector(grpLocalPos[1], grpLocalPos[2], grpLocalPos[3])
+            grpWAng = Angle(0, 0, 0)
+            grpWScale = Vector(1, 1, 1)
+        else
+            local pWPos, pWAng, pWScale = Math3D.computeWorldTransform(sceneGraph, groupParentId)
+            local pMat = Matrix()
+            pMat:translate(pWPos)
+            pMat:rotate(pWAng)
+            grpWPos = pMat * Vector(grpLocalPos[1], grpLocalPos[2], grpLocalPos[3])
+            grpWAng = pWAng
+            grpWScale = pWScale
+        end
+
+        local grpMat = Matrix()
+        grpMat:translate(grpWPos)
+        grpMat:rotate(grpWAng)
+        local grpInv = grpMat:getInverseTR()
+
+        local minS, maxS = Constants.MIN_SCALE or 0.05, Constants.MAX_SCALE or 100.0
+        local function safeDiv(a, b)
+            if math.abs(b or 1) < 1e-4 then return a end
+            return a / b
+        end
+
+        local moveEntries = {}
+        for i = 1, #ids do
+            local id = ids[i]
+            local node = sceneGraph:getNode(id)
+            if node and id ~= rootId then
+                local wc = worldCache[id]
+                local lPos = grpInv * wc.wPos
+                local mWorld = Matrix()
+                mWorld:setAngles(wc.wAng)
+                local lAng = (grpInv * mWorld):getAngles()
+                moveEntries[#moveEntries + 1] = {
+                    id = id,
+                    oldParentId = node.parentId,
+                    oldIndex = sceneGraph:getChildIndex(node.parentId, id) or 1,
+                    oldTransform = cloneTransformSnap(node.transform),
+                    newTransform = {
+                        pos = { math.round(lPos[1], 3), math.round(lPos[2], 3), math.round(lPos[3], 3) },
+                        ang = { math.round(math.normalizeAngle(lAng[1]), 2), math.round(math.normalizeAngle(lAng[2]), 2), math.round(math.normalizeAngle(lAng[3]), 2) },
+                        scale = {
+                            math.clamp(math.round(safeDiv(wc.wScale[1], grpWScale[1]), 3), minS, maxS),
+                            math.clamp(math.round(safeDiv(wc.wScale[2], grpWScale[2]), 3), minS, maxS),
+                            math.clamp(math.round(safeDiv(wc.wScale[3], grpWScale[3]), 3), minS, maxS),
+                        },
+                        pivot = IR.cloneVec3(node.transform.pivot),
+                    },
+                }
+            end
+        end
+        if #moveEntries == 0 then return false end
+        return commands:execute(Commands.createGroupSelectedCommand(sceneGraph, "Group Selected", groupSnap, groupParentId, moveEntries, prevSel, prevPrim))
+    end
+
+    function actions.renameNode(id, newName)
+        local node = sceneGraph:getNode(id)
+        if not node or id == sceneGraph:getRootId() then return false end
+        local clean = string.trim(tostring(newName or ""))
+        if clean == "" or clean == node.name then return false end
+        return commands:execute(Commands.createRenameCommand(sceneGraph, id, node.name, clean))
+    end
+
+    function actions.setNodeTransformAxis(id, field, axisIdx, numVal)
+        local node = sceneGraph:getNode(id)
+        if not node or not node.transform or id == sceneGraph:getRootId() then return false end
+        if type(numVal) ~= "number" or numVal ~= numVal or math.abs(numVal) == math.huge then
+            return false
+        end
+        local vec = node.transform[field]
+        if not vec or axisIdx < 1 or axisIdx > 3 then return false end
+
+        local v = numVal
+        if field == "scale" then
+            v = math.clamp(math.round(v, 3), Constants.MIN_SCALE or 0.05, Constants.MAX_SCALE or 100.0)
+        elseif field == "ang" then
+            v = math.round(v, 2)
+        else
+            v = math.round(v, 3)
+        end
+
+        if math.abs((vec[axisIdx] or 0) - v) < 1e-4 then
+            return false
+        end
+
+        local before = cloneTransformSnap(node.transform)
+        local after = cloneTransformSnap(node.transform)
+        after[field][axisIdx] = v
+        local label = (field == "pos" and "Position") or (field == "ang" and "Rotation") or "Scale"
+        return commands:execute(Commands.createTransformCommand(sceneGraph, "Edit " .. label, {
+            { id = id, before = before, after = after },
+        }))
+    end
+
+    function actions.toggleVisibility(targetId)
+        local ids = {}
+        local rootId = sceneGraph:getRootId()
+        if targetId then
+            if targetId ~= rootId and sceneGraph:getNode(targetId) then
+                ids[1] = targetId
+            end
+        else
+            for _, id in ipairs(sceneGraph:getSelectedIds()) do
+                if id ~= rootId and sceneGraph:getNode(id) then
+                    ids[#ids + 1] = id
+                end
+            end
+        end
+        if #ids == 0 then return false end
+        local entries = {}
+        for i = 1, #ids do
+            local n = sceneGraph:getNode(ids[i])
+            if n then
+                entries[#entries + 1] = {
+                    id = n.id,
+                    before = { visible = n.visible },
+                    after = { visible = not n.visible },
+                }
+            end
+        end
+        if #entries == 0 then return false end
+        return commands:execute(Commands.createAppearanceCommand(sceneGraph, "Toggle Visibility", entries))
+    end
+
+    function actions.setNodeColorChannel(id, chanIdx, val)
+        local node = sceneGraph:getNode(id)
+        if not node or not node.appearance or id == sceneGraph:getRootId() then return false end
+        if type(val) ~= "number" or val ~= val or math.abs(val) == math.huge then return false end
+        if chanIdx < 1 or chanIdx > 4 then return false end
+        local c = node.appearance.color or { 255, 255, 255, 255 }
+        local clamped = math.clamp(math.floor(val + 0.5), 0, 255)
+        if (c[chanIdx] or 255) == clamped then return false end
+
+        local beforeCol = { c[1] or 255, c[2] or 255, c[3] or 255, c[4] or 255 }
+        local afterCol = { c[1] or 255, c[2] or 255, c[3] or 255, c[4] or 255 }
+        afterCol[chanIdx] = clamped
+        return commands:execute(Commands.createAppearanceCommand(sceneGraph, "Edit Color", {
+            { id = id, before = { color = beforeCol }, after = { color = afterCol } },
+        }))
+    end
+
+    function actions.setNodeMaterial(id, rawMat)
+        local node = sceneGraph:getNode(id)
+        if not node or not node.appearance or id == sceneGraph:getRootId() then
+            return false, "Invalid node"
+        end
+        local ok, resOrErr = Properties.validateMaterialPath(rawMat)
+        if not ok then
+            return false, resOrErr
+        end
+        local oldMat = node.appearance.material or ""
+        if resOrErr == oldMat then
+            return true, nil
+        end
+        commands:execute(Commands.createAppearanceCommand(sceneGraph, resOrErr == "" and "Clear Material" or "Set Material", {
+            { id = id, before = { material = oldMat }, after = { material = resOrErr } },
+        }))
+        return true, nil
+    end
+
+    SOLACE._ctx = {
+        state = state,
+        events = events,
+        commands = commands,
+        sceneGraph = sceneGraph,
+        runtime = runtime,
+        ui = ui,
+        layout = layout,
+        camera = camera,
+        actions = actions,
+    }
 
     local startupMsg = formatDiagState("[SOLACE CL] Loaded")
     print(startupMsg)
@@ -8450,6 +10009,18 @@ do (function(SOLACE)
 
         if not state.studioOpen or isOverlayOrUnfocused() then return end
 
+        if key == KEY.ESCAPE and Explorer._draggingId then
+            Explorer.cancelDrag(ui)
+            return
+        end
+
+        if key == KEY.ESCAPE and ImGui._activePopup then
+            ImGui._activePopup = nil
+            ImGui._activePopupRect = nil
+            ImGui._activePopupCloseRequested = false
+            return
+        end
+
         if key == KEY.ESCAPE and Gizmos.dragging then
             Gizmos.cancelDrag(sceneGraph)
             ui:release("gizmo_drag")
@@ -8477,6 +10048,9 @@ do (function(SOLACE)
                 return
             elseif key == KEY.Y then
                 actions.redo()
+                return
+            elseif key == KEY.D then
+                actions.duplicateSelected()
                 return
             end
         end
@@ -8588,7 +10162,7 @@ do (function(SOLACE)
         end
 
         local inPanel = ui:pointInRect(rect.x, rect.y, w, h) and (ui._topHoverWinId == nil)
-        local pointerChanged = (ui.dx ~= 0 or ui.dy ~= 0 or ui.leftPressed or ui.leftReleased or ui.leftDown or ui.middlePressed or ui.wheelDelta ~= 0)
+        local pointerChanged = (ui.dx ~= 0 or ui.dy ~= 0 or ui.leftPressed or ui.leftReleased or ui.leftDown or ui.rightPressed or ui.rightReleased or ui.middlePressed or ui.wheelDelta ~= 0)
         local dirty = (w ~= c.w) or (h ~= c.h) or (sig ~= c.sig)
             or (inPanel and (pointerChanged or not c.wasInPanel))
             or (not inPanel and c.wasInPanel)
@@ -8830,28 +10404,35 @@ do (function(SOLACE)
                 Toolbox.draw(ui, state, r, actions)
             end)
 
-            local expFocus = (focId == "explorer_search")
+            local expFocus = (focId ~= nil and string.sub(focId, 1, 4) == "exp_") or (focId == "explorer_search")
+            local expBuf = (expFocus and focId) and tostring(ui._editBuffers[focId] or "") or ""
             local expSig = tv .. "|" .. sceneGraph._version .. "|" .. tostring(sel and sel.id) .. "|" .. #selIds
-                .. "|" .. state.explorerSearch .. "|" .. tostring(Explorer._scrollY) .. "|" .. (expFocus and blinkPhase or "")
+                .. "|" .. state.explorerSearch .. "|" .. tostring(Explorer._scrollY)
+                .. "|" .. tostring(Explorer._renamingId) .. "|" .. tostring(Explorer._draggingId)
+                .. "|" .. (expFocus and (tostring(focId) .. ":" .. expBuf .. ":" .. blinkPhase) or "")
             drawCachedPanel("explorer", rects.explorer, expSig, actPrefix4 == "exp_" or actPrefix4 == "expl", allowRepaint, function(r)
                 Explorer.draw(ui, state, sceneGraph, r, actions)
             end)
 
-            local propFocus = (focId ~= nil and string.sub(focId, 1, 15) == "prop_node_name_")
+            local propFocus = (focId ~= nil and string.sub(focId, 1, 5) == "prop_")
+            local propBuf = (propFocus and focId) and tostring(ui._editBuffers[focId] or "") or ""
             local selXform = sel and (sel.transform.pos[1] .. "," .. sel.transform.pos[2] .. "," .. sel.transform.pos[3]
                 .. "," .. sel.transform.ang[1] .. "," .. sel.transform.ang[2] .. "," .. sel.transform.ang[3]
                 .. "," .. sel.transform.scale[1] .. "," .. sel.transform.scale[2] .. "," .. sel.transform.scale[3]) or ""
+            local selApp = (sel and sel.appearance) and (tostring(sel.appearance.material)
+                .. ":" .. table.concat(sel.appearance.color or {}, ",")) or ""
             local c = state.camera
             local g = state.grid
             local s = state.sections
             local propSig = tv .. "|" .. sceneGraph._version .. "|" .. state.activeTool .. "|" .. tostring(sel and sel.id) .. "|" .. tostring(sel and sel.name)
-                .. "|" .. tostring(sel and sel.visible) .. "|" .. #selIds .. "|" .. selXform
+                .. "|" .. tostring(sel and sel.visible) .. "|" .. #selIds .. "|" .. selXform .. "|" .. selApp
+                .. "|" .. tostring(Properties._matError)
                 .. "|" .. c.speed .. ":" .. c.boostMult .. ":" .. c.sensitivity .. ":" .. c.fov .. ":" .. c.smoothing
                 .. "|" .. tostring(g.enabled) .. ":" .. g.spacing .. ":" .. g.halfExtents .. ":" .. g.originMode
                 .. ":" .. tostring(g.showOrientationGizmo) .. ":" .. tostring(g.showTelemetry) .. ":" .. tostring(state.debugMode)
-                .. "|" .. tostring(s.selection) .. tostring(s.camera) .. tostring(s.grid) .. tostring(s.origin) .. tostring(s.quotas)
+                .. "|" .. tostring(s.selection) .. tostring(s.transform) .. tostring(s.appearance) .. tostring(s.camera) .. tostring(s.grid) .. tostring(s.origin) .. tostring(s.quotas)
                 .. "|" .. (s.quotas and math.floor(ui._frameTime * 5) or 0)
-                .. "|" .. (propFocus and blinkPhase or "")
+                .. "|" .. (propFocus and (tostring(focId) .. ":" .. propBuf .. ":" .. blinkPhase) or "")
                 .. "|" .. tostring(Properties._scrollY)
             drawCachedPanel("properties", rects.properties, propSig, actPrefix4 == "prop" or actPrefix4 == "sec_", allowRepaint, function(r)
                 Properties.draw(ui, state, sceneGraph, runtime, camera, r, actions)
