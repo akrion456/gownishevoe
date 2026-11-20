@@ -93,7 +93,7 @@ do (function(SOLACE)
     Constants.APP_NAME = "SOLACE"
     Constants.APP_SUBTITLE = "Visual Animation & Effects Studio"
     Constants.APP_TAGLINE = "Create. Animate. Visualize. Export."
-    Constants.VERSION = "0.2.0-phase2"
+    Constants.VERSION = "0.3.0-phase3"
     Constants.IR_SCHEMA_VERSION = 1
 
     -- Node types supported by the Scene Intermediate Representation (IR)
@@ -126,11 +126,11 @@ do (function(SOLACE)
 
     -- Tool definitions (explicitly tagging implementation phase)
     Constants.TOOLS = {
-        { id = "select", label = "Select", icon = "cursor", phase = 2, ready = true,  hotkey = "Q", desc = "Select objects in 3D viewport (Click, Ctrl+Click multi-select, F: Focus)" },
-        { id = "move",   label = "Move",   icon = "move",   phase = 3, ready = false, hotkey = "W", desc = "3D Translation Gizmo — Arriving in Phase 3" },
-        { id = "rotate", label = "Rotate", icon = "rotate", phase = 3, ready = false, hotkey = "E", desc = "3D Rotation Gizmo — Arriving in Phase 3" },
-        { id = "scale",  label = "Scale",  icon = "scale",  phase = 3, ready = false, hotkey = "R", desc = "3D Scale Gizmo — Arriving in Phase 3" },
-        { id = "pivot",  label = "Pivot",  icon = "pivot",  phase = 5, ready = false, hotkey = "T", desc = "Custom Pivot Editor — Arriving in Phase 5" },
+        { id = "select", label = "Select", icon = "cursor", phase = 2, ready = true,  hotkey = "Q/1", desc = "Select objects in 3D viewport (Click, Ctrl+Click multi-select, F: Focus | Q or 1)" },
+        { id = "move",   label = "Move",   icon = "move",   phase = 3, ready = true,  hotkey = "2",   desc = "3D Translation Gizmo — Drag X/Y/Z axes (Hold Shift: Grid Snap | Hotkey: 2)" },
+        { id = "rotate", label = "Rotate", icon = "rotate", phase = 3, ready = true,  hotkey = "E/3", desc = "3D Rotation Gizmo — Drag X/Y/Z rings (Hold Shift: 15 deg Snap | E or 3)" },
+        { id = "scale",  label = "Scale",  icon = "scale",  phase = 3, ready = true,  hotkey = "R/4", desc = "3D Scale Gizmo — Drag X/Y/Z axes or center cube (Hold Shift: 0.1x Snap | R or 4)" },
+        { id = "pivot",  label = "Pivot",  icon = "pivot",  phase = 5, ready = false, hotkey = "T",   desc = "Custom Pivot Editor — Arriving in Phase 5" },
     }
 
     -- Toolbox categories (populated incrementally; full mounted scanner in Phase 6)
@@ -424,6 +424,7 @@ do (function(SOLACE)
             _undoStack = {},
             _redoStack = {},
             _maxHistory = maxHistory or 100,
+            _version = 1,
         }, Commands)
     end
 
@@ -435,6 +436,7 @@ do (function(SOLACE)
         cmd:redo()
         self._undoStack[#self._undoStack + 1] = cmd
         self._redoStack = {}
+        self._version = self._version + 1
 
         if #self._undoStack > self._maxHistory then
             table.remove(self._undoStack, 1)
@@ -471,6 +473,7 @@ do (function(SOLACE)
         self._undoStack[idx] = nil
         cmd:undo()
         self._redoStack[#self._redoStack + 1] = cmd
+        self._version = self._version + 1
         if self._events then
             self._events:emit("historyChanged", self)
         end
@@ -484,6 +487,7 @@ do (function(SOLACE)
         self._redoStack[idx] = nil
         cmd:redo()
         self._undoStack[#self._undoStack + 1] = cmd
+        self._version = self._version + 1
         if self._events then
             self._events:emit("historyChanged", self)
         end
@@ -493,9 +497,39 @@ do (function(SOLACE)
     function Commands:clear()
         self._undoStack = {}
         self._redoStack = {}
+        self._version = self._version + 1
         if self._events then
             self._events:emit("historyChanged", self)
         end
+    end
+
+    local function applyTransformSnapshot(sceneGraph, id, snap)
+        local node = sceneGraph:getNode(id)
+        if not node or not node.transform then return end
+        local t = node.transform
+        t.pos[1], t.pos[2], t.pos[3] = snap.pos[1], snap.pos[2], snap.pos[3]
+        t.ang[1], t.ang[2], t.ang[3] = snap.ang[1], snap.ang[2], snap.ang[3]
+        t.scale[1], t.scale[2], t.scale[3] = snap.scale[1], snap.scale[2], snap.scale[3]
+        sceneGraph:notifyNodeUpdated(id)
+    end
+
+    -- Creates a single reversible command for one or more node transform edits
+    function Commands.createTransformCommand(sceneGraph, label, entries)
+        return {
+            label = label or "Transform",
+            undo = function()
+                for i = 1, #entries do
+                    local e = entries[i]
+                    applyTransformSnapshot(sceneGraph, e.id, e.before)
+                end
+            end,
+            redo = function()
+                for i = 1, #entries do
+                    local e = entries[i]
+                    applyTransformSnapshot(sceneGraph, e.id, e.after)
+                end
+            end,
+        }
     end
 
 
@@ -1356,7 +1390,7 @@ do (function(SOLACE)
 
         local entry = self._entries[nodeId]
         local pos, ang, scale
-        if entry and entry.worldPos then
+        if entry and entry.worldPos and not self._dirtyNodes[nodeId] then
             pos, ang, scale = entry.worldPos, entry.worldAng, entry.worldScale
         else
             pos, ang, scale = SOLACE.Math3D.computeWorldTransform(self._scene, nodeId)
@@ -1517,6 +1551,126 @@ do (function(SOLACE)
         m:rotate(ang)
         m:translate(localCenter)
         return m:getTranslation(), radius
+    end
+
+    -- Returns inverse world rotation Matrix of node's parent chain (nil when parent is root)
+    function Math3D.getParentInverseRotation(sceneGraph, nodeId)
+        local node = sceneGraph:getNode(nodeId)
+        if not node then return nil end
+        local rootId = sceneGraph:getRootId()
+        local chain = {}
+        local cur = node.parentId and sceneGraph:getNode(node.parentId) or nil
+        local guard = 0
+        while cur and cur.id ~= rootId and guard < 64 do
+            chain[#chain + 1] = cur
+            cur = cur.parentId and sceneGraph:getNode(cur.parentId) or nil
+            guard = guard + 1
+        end
+        if #chain == 0 then return nil end
+
+        local rotMat = Matrix()
+        for i = #chain, 1, -1 do
+            local a = chain[i].transform.ang
+            rotMat:rotate(Angle(a[1] or 0, a[2] or 0, a[3] or 0))
+        end
+        return rotMat:getInverseTR()
+    end
+
+    function Math3D.worldDeltaToParentLocal(parentInvRot, worldDelta)
+        if not parentInvRot then return worldDelta end
+        return parentInvRot * worldDelta
+    end
+
+    function Math3D.worldAngleToParentLocal(parentInvRot, worldAng)
+        if not parentInvRot then
+            return { worldAng[1], worldAng[2], worldAng[3] }
+        end
+        local m = Matrix()
+        m:setAngles(worldAng)
+        local localAng = (parentInvRot * m):getAngles()
+        return { localAng[1], localAng[2], localAng[3] }
+    end
+
+    -- Local orthonormal gizmo basis in world space (Source: +X Forward, +Y Left/-Right, +Z Up)
+    function Math3D.getGizmoAxes(worldAng)
+        if not worldAng then
+            return Vector(1, 0, 0), Vector(0, 1, 0), Vector(0, 0, 1)
+        end
+        return worldAng:getForward(), -worldAng:getRight(), worldAng:getUp()
+    end
+
+    -- Closest distance between infinite ray R(t)=rayOrigin+rayDir*t (t>=0) and segment [segA, segB]
+    -- Returns: dist, rayT, segU, segClosestPoint
+    function Math3D.closestRayToSegment(rayOrigin, rayDir, segA, segB)
+        local ux, uy, uz = rayDir[1], rayDir[2], rayDir[3]
+        local vx, vy, vz = segB[1] - segA[1], segB[2] - segA[2], segB[3] - segA[3]
+        local wx, wy, wz = rayOrigin[1] - segA[1], rayOrigin[2] - segA[2], rayOrigin[3] - segA[3]
+
+        local a = ux * ux + uy * uy + uz * uz
+        local b = ux * vx + uy * vy + uz * vz
+        local c = vx * vx + vy * vy + vz * vz
+        local d = ux * wx + uy * wy + uz * wz
+        local e = vx * wx + vy * wy + vz * wz
+        local D = a * c - b * b
+
+        local sc, sN, sD = 0, 0, D
+        local tc, tN, tD = 0, 0, D
+
+        if D < 1e-6 then
+            sN = 0
+            sD = 1
+            tN = e
+            tD = c
+        else
+            sN = (b * e - c * d)
+            tN = (a * e - b * d)
+            if sN < 0 then
+                sN = 0
+                tN = e
+                tD = c
+            end
+        end
+
+        if tN < 0 then
+            tN = 0
+            if -d < 0 then
+                sN = 0
+            else
+                sN = -d
+                sD = a
+            end
+        elseif tN > tD then
+            tN = tD
+            if (-d + b) < 0 then
+                sN = 0
+            else
+                sN = (-d + b)
+                sD = a
+            end
+        end
+
+        sc = (math.abs(sN) < 1e-6) and 0 or (sN / sD)
+        tc = (math.abs(tN) < 1e-6) and 0 or (tN / tD)
+        if sc < 0 then sc = 0 end
+        tc = math.clamp(tc, 0, 1)
+
+        local dx = wx + sc * ux - tc * vx
+        local dy = wy + sc * uy - tc * vy
+        local dz = wz + sc * uz - tc * vz
+        local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+        local segPt = Vector(segA[1] + tc * vx, segA[2] + tc * vy, segA[3] + tc * vz)
+        return dist, sc, tc, segPt
+    end
+
+    -- Closest distance between ray R(t)=rayOrigin+rayDir*t (t>=0) and 3D point pt
+    function Math3D.closestRayToPoint(rayOrigin, rayDir, pt)
+        local px, py, pz = pt[1] - rayOrigin[1], pt[2] - rayOrigin[2], pt[3] - rayOrigin[3]
+        local t = px * rayDir[1] + py * rayDir[2] + pz * rayDir[3]
+        if t < 0 then t = 0 end
+        local dx = rayOrigin[1] + rayDir[1] * t - pt[1]
+        local dy = rayOrigin[2] + rayDir[2] * t - pt[2]
+        local dz = rayOrigin[3] + rayDir[3] * t - pt[3]
+        return math.sqrt(dx * dx + dy * dy + dz * dz), t
     end
 
 
@@ -1868,11 +2022,735 @@ end)(SOLACE) end
 -- SECTION 12: Transform gizmos (Phase 3)
 -- ============================================================================
 do (function(SOLACE)
-    -- Reserved for Phase 3: Interactive 3D Move, Rotate, Scale & Pivot Gizmos.
+    local Constants = SOLACE.Constants
+    local IR        = SOLACE.IR
+    local Math3D    = SOLACE.Math3D
+    local Commands  = SOLACE.Commands
+
     local Gizmos = {
-        ready = false,
+        ready = true,
         phase = 3,
+        hoveredAxis = nil, -- "x" | "y" | "z" | "uniform" | nil
+        activeAxis = nil,  -- "x" | "y" | "z" | "uniform" | nil
+        dragging = false,
+        dragData = nil,
     }
+
+    local RAY_LEN = 16384
+    local MIN_SCALE = 0.05
+    local MAX_SCALE = 100.0
+    local RING_SEGS = 32
+    local COS_TABLE = {}
+    local SIN_TABLE = {}
+    for i = 0, RING_SEGS do
+        local a = (i / RING_SEGS) * math.pi * 2
+        COS_TABLE[i + 1] = math.cos(a)
+        SIN_TABLE[i + 1] = math.sin(a)
+    end
+
+    local COL_HILITE  = { 255, 224, 96, 255 }
+    local COL_UNIFORM = { 236, 240, 248, 255 }
+    local COL_GUIDE   = { 255, 224, 96, 135 }
+
+    local WORLD_X = Vector(1, 0, 0)
+    local WORLD_Y = Vector(0, 1, 0)
+    local WORLD_Z = Vector(0, 0, 1)
+
+    local _anchorKey = nil
+    local _anchorOrigin = nil
+    local _anchorAng = nil
+    local _lastPickKey = nil
+    local _lastPickAxis = nil
+
+    local function axisColor(axis)
+        local C = SOLACE.Theme.C
+        if axis == "x" then return C.axisX end
+        if axis == "y" then return C.axisY end
+        if axis == "z" then return C.axisZ end
+        return COL_UNIFORM
+    end
+
+    local function getEffectiveTargets(sceneGraph)
+        local selIds = sceneGraph:getSelectedIds()
+        if #selIds == 0 then return nil, nil end
+
+        local rootId = sceneGraph:getRootId()
+        local selMap = {}
+        for i = 1, #selIds do
+            local id = selIds[i]
+            if id ~= rootId then
+                selMap[id] = true
+            end
+        end
+
+        local targets = {}
+        local primaryId = sceneGraph:getSelectedId()
+        local anchorId = nil
+
+        for i = 1, #selIds do
+            local id = selIds[i]
+            if id ~= rootId then
+                local node = sceneGraph:getNode(id)
+                if node and not node.locked then
+                    -- Skip descendants whose ancestor is also selected (prevents double-transforming)
+                    local hasSelectedAncestor = false
+                    local cur = node.parentId and sceneGraph:getNode(node.parentId) or nil
+                    local guard = 0
+                    while cur and cur.id ~= rootId and guard < 64 do
+                        if selMap[cur.id] then
+                            hasSelectedAncestor = true
+                            break
+                        end
+                        cur = cur.parentId and sceneGraph:getNode(cur.parentId) or nil
+                        guard = guard + 1
+                    end
+                    if not hasSelectedAncestor then
+                        targets[#targets + 1] = id
+                        if id == primaryId then
+                            anchorId = id
+                        end
+                    end
+                end
+            end
+        end
+
+        if #targets == 0 then return nil, nil end
+        if not anchorId then anchorId = targets[1] end
+        return anchorId, targets
+    end
+
+    local function getAnchorTransform(sceneGraph, anchorId)
+        local key = anchorId .. ":" .. tostring(sceneGraph._version or 0)
+        if key == _anchorKey and _anchorOrigin then
+            return _anchorOrigin, _anchorAng
+        end
+        local wPos, wAng = Math3D.computeWorldTransform(sceneGraph, anchorId)
+        _anchorKey = key
+        _anchorOrigin = wPos
+        _anchorAng = wAng
+        return wPos, wAng
+    end
+
+    local function getHandleLength(camera, origin)
+        local dist = (origin - camera.camPos):getLength()
+        local fov = (camera.state and camera.state.camera and camera.state.camera.fov) or 80
+        local halfFov = math.rad(math.clamp(fov, 30, 120) * 0.5)
+        return math.clamp(dist * math.tan(halfFov) * 0.22, 18, 220)
+    end
+
+    local function getToolAxes(tool, worldAng)
+        if tool == "move" then
+            return WORLD_X, WORLD_Y, WORLD_Z
+        end
+        return Math3D.getGizmoAxes(worldAng)
+    end
+
+    local function getAxisVector(axis, ax, ay, az)
+        if axis == "x" then return ax end
+        if axis == "y" then return ay end
+        if axis == "z" then return az end
+        return nil
+    end
+
+    local function computeDragPlaneNormal(camera, origin, axisDir)
+        local camToOrigin = origin - camera.camPos
+        local len = camToOrigin:getLength()
+        if len < 0.001 then
+            camToOrigin = camera.camAng:getForward()
+        else
+            camToOrigin = camToOrigin / len
+        end
+
+        local tangent = axisDir:cross(camToOrigin)
+        if tangent:getLength() < 0.001 then
+            local fallback = (math.abs(axisDir[3]) < 0.9) and WORLD_Z or WORLD_X
+            tangent = axisDir:cross(fallback)
+        end
+        tangent = tangent:getNormalized()
+        return tangent:cross(axisDir):getNormalized()
+    end
+
+    local function pickHandle(ui, state, camera, sceneGraph, vpRect)
+        local tool = state.activeTool
+        if tool ~= "move" and tool ~= "rotate" and tool ~= "scale" then
+            return nil
+        end
+        if not state.studioOpen or state.viewportLooking then
+            return nil
+        end
+        if not ui:pointInRect(vpRect.x, vpRect.y, vpRect.w, vpRect.h) then
+            return nil
+        end
+
+        local anchorId = getEffectiveTargets(sceneGraph)
+        if not anchorId then return nil end
+
+        local cp, ca = camera.camPos, camera.camAng
+        local key = ui.mx .. ":" .. ui.my .. ":" .. cp[1] .. ":" .. cp[2] .. ":" .. cp[3]
+            .. ":" .. ca[1] .. ":" .. ca[2] .. ":" .. state.camera.fov
+            .. ":" .. tool .. ":" .. anchorId .. ":" .. (sceneGraph._version or 0)
+        if not ui.leftPressed and key == _lastPickKey then
+            return _lastPickAxis
+        end
+        _lastPickKey = key
+
+        local origin, worldAng = getAnchorTransform(sceneGraph, anchorId)
+        local handleLen = getHandleLength(camera, origin)
+        local ax, ay, az = getToolAxes(tool, worldAng)
+        local rayDir = trace.aimVector(ca, state.camera.fov, ui.mx, ui.my, ui.scrW, ui.scrH)
+        local rayOrigin = cp
+
+        local bestAxis = nil
+
+        if tool == "scale" then
+            local ptDist = Math3D.closestRayToPoint(rayOrigin, rayDir, origin)
+            if ptDist <= math.max(5.5, handleLen * 0.18) then
+                _lastPickAxis = "uniform"
+                return "uniform"
+            end
+        end
+
+        if tool == "move" or tool == "scale" then
+            local startFrac = (tool == "move") and 0.14 or 0.18
+            local endFrac = (tool == "move") and 1.12 or 1.06
+            local thresh = math.max(4.5, handleLen * 0.14)
+            local bestDist = thresh
+
+            local axes = { { "x", ax }, { "y", ay }, { "z", az } }
+            for i = 1, 3 do
+                local name, dir = axes[i][1], axes[i][2]
+                local segA = origin + dir * (handleLen * startFrac)
+                local segB = origin + dir * (handleLen * endFrac)
+                local d = Math3D.closestRayToSegment(rayOrigin, rayDir, segA, segB)
+                if d <= bestDist then
+                    bestDist = d
+                    bestAxis = name
+                end
+            end
+        elseif tool == "rotate" then
+            local radius = handleLen * 0.90
+            local thresh = math.max(4.5, handleLen * 0.13)
+            local bestScore = 1e9
+            local ringDefs = {
+                { "x", ay, az },
+                { "y", az, ax },
+                { "z", ax, ay },
+            }
+            for i = 1, 3 do
+                local name, u, v = ringDefs[i][1], ringDefs[i][2], ringDefs[i][3]
+                local minRingDist = thresh
+                local minRingRayT = 1e9
+                local prevPt = origin + u * radius
+                for s = 1, RING_SEGS do
+                    local c = COS_TABLE[s + 1] * radius
+                    local sn = SIN_TABLE[s + 1] * radius
+                    local nextPt = origin + u * c + v * sn
+                    local d, rayT = Math3D.closestRayToSegment(rayOrigin, rayDir, prevPt, nextPt)
+                    if d <= minRingDist then
+                        if d < minRingDist - 0.5 or rayT < minRingRayT then
+                            minRingDist = d
+                            minRingRayT = rayT
+                        end
+                    end
+                    prevPt = nextPt
+                end
+                if minRingDist < thresh then
+                    -- Prefer the front-facing arc when two rings cross on screen
+                    local score = minRingDist + minRingRayT * 0.015
+                    if score < bestScore then
+                        bestScore = score
+                        bestAxis = name
+                    end
+                end
+            end
+        end
+
+        _lastPickAxis = bestAxis
+        return bestAxis
+    end
+
+    local function sameVec3(a, b)
+        return math.abs(a[1] - b[1]) <= 1e-4
+            and math.abs(a[2] - b[2]) <= 1e-4
+            and math.abs(a[3] - b[3]) <= 1e-4
+    end
+
+    local function beginDrag(ui, state, camera, sceneGraph, axis)
+        local anchorId, targets = getEffectiveTargets(sceneGraph)
+        if not anchorId or not targets then return false end
+
+        local origin, worldAng = getAnchorTransform(sceneGraph, anchorId)
+        local handleLen = getHandleLength(camera, origin)
+        local tool = state.activeTool
+        local ax, ay, az = getToolAxes(tool, worldAng)
+        local axisDir = getAxisVector(axis, ax, ay, az)
+        local rayDir = trace.aimVector(camera.camAng, state.camera.fov, ui.mx, ui.my, ui.scrW, ui.scrH)
+
+        local entries = {}
+        for i = 1, #targets do
+            local id = targets[i]
+            local node = sceneGraph:getNode(id)
+            if node and node.transform then
+                local wPos, wAng = Math3D.computeWorldTransform(sceneGraph, id)
+                entries[#entries + 1] = {
+                    id = id,
+                    node = node,
+                    before = {
+                        pos   = IR.cloneVec3(node.transform.pos),
+                        ang   = IR.cloneVec3(node.transform.ang),
+                        scale = IR.cloneVec3(node.transform.scale),
+                    },
+                    parentInvRot = Math3D.getParentInverseRotation(sceneGraph, id),
+                    startWorldPos = wPos,
+                    startWorldAng = wAng,
+                }
+            end
+        end
+        if #entries == 0 then return false end
+
+        local dd = {
+            tool = tool,
+            axis = axis,
+            origin = origin:clone(),
+            worldAng = worldAng:clone(),
+            ax = ax,
+            ay = ay,
+            az = az,
+            axisDir = axisDir,
+            handleLen = handleLen,
+            startMouseX = ui.mx,
+            startMouseY = ui.my,
+            entries = entries,
+            feedbackText = "",
+            axisVisualFactor = 1.0,
+            totalDeg = 0,
+        }
+
+        if tool == "move" or (tool == "scale" and axis ~= "uniform") then
+            local pNormal = computeDragPlaneNormal(camera, origin, axisDir)
+            dd.planeNormal = pNormal
+            local hit = trace.intersectRayWithPlane(camera.camPos, rayDir * RAY_LEN, origin, pNormal)
+            dd.startProj = hit and (hit - origin):dot(axisDir) or 0
+        elseif tool == "rotate" then
+            local hit = trace.intersectRayWithPlane(camera.camPos, rayDir * RAY_LEN, origin, axisDir)
+            if math.abs(rayDir:dot(axisDir)) < 0.16 or not hit then
+                dd.edgeOn = true
+            else
+                local v0 = hit - origin
+                if v0:getLength() < 0.001 then
+                    v0 = (math.abs(axisDir[3]) < 0.9) and WORLD_Z:cross(axisDir) or WORLD_X:cross(axisDir)
+                end
+                v0 = v0:getNormalized()
+                dd.edgeOn = false
+                dd.startVec = v0
+                dd.prevVec = v0
+                dd.curVec = v0
+            end
+        end
+
+        Gizmos.dragging = true
+        Gizmos.activeAxis = axis
+        Gizmos.hoveredAxis = axis
+        Gizmos.dragData = dd
+        return true
+    end
+
+    local function updateDrag(ui, state, camera, sceneGraph)
+        local dd = Gizmos.dragData
+        if not dd then return end
+
+        local shift = hasPermission("input") and input.isShiftDown() or false
+        local rayDir = trace.aimVector(camera.camAng, state.camera.fov, ui.mx, ui.my, ui.scrW, ui.scrH)
+        local tool = dd.tool
+        local axis = dd.axis
+        local axisLabel = string.upper(axis)
+
+        if tool == "move" then
+            local hit = trace.intersectRayWithPlane(camera.camPos, rayDir * RAY_LEN, dd.origin, dd.planeNormal)
+            if not hit then return end
+            local delta = (hit - dd.origin):dot(dd.axisDir) - dd.startProj
+            if shift then
+                local snap = math.max(1, (state.grid and state.grid.spacing) or 32)
+                delta = math.round(delta / snap) * snap
+            end
+            local worldDelta = dd.axisDir * delta
+            for i = 1, #dd.entries do
+                local e = dd.entries[i]
+                local localDelta = Math3D.worldDeltaToParentLocal(e.parentInvRot, worldDelta)
+                local nx = math.round(e.before.pos[1] + localDelta[1], 3)
+                local ny = math.round(e.before.pos[2] + localDelta[2], 3)
+                local nz = math.round(e.before.pos[3] + localDelta[3], 3)
+                local p = e.node.transform.pos
+                if p[1] ~= nx or p[2] ~= ny or p[3] ~= nz then
+                    p[1], p[2], p[3] = nx, ny, nz
+                    sceneGraph:notifyNodeUpdated(e.id)
+                end
+            end
+            dd.feedbackText = string.format("Move %s: %+.1f u%s", axisLabel, delta, shift and " [Snap]" or "")
+
+        elseif tool == "rotate" then
+            local deltaDeg
+            if dd.edgeOn then
+                deltaDeg = ((ui.mx - dd.startMouseX) - (ui.my - dd.startMouseY)) * 0.6
+            else
+                local hit = trace.intersectRayWithPlane(camera.camPos, rayDir * RAY_LEN, dd.origin, dd.axisDir)
+                if hit then
+                    local v1 = hit - dd.origin
+                    if v1:getLength() > 0.001 then
+                        v1 = v1:getNormalized()
+                        local sinStep = dd.axisDir:dot(dd.prevVec:cross(v1))
+                        local cosStep = math.clamp(dd.prevVec:dot(v1), -1, 1)
+                        local stepDeg = math.deg(math.atan2(sinStep, cosStep))
+                        dd.totalDeg = dd.totalDeg + stepDeg
+                        dd.prevVec = v1
+                        dd.curVec = v1
+                    end
+                end
+                deltaDeg = dd.totalDeg
+            end
+            if shift then
+                deltaDeg = math.round(deltaDeg / 15) * 15
+            end
+            dd.displayDeg = deltaDeg
+
+            for i = 1, #dd.entries do
+                local e = dd.entries[i]
+                local newWorldAng = e.startWorldAng:rotateAroundAxis(dd.axisDir, deltaDeg)
+                local localAng = Math3D.worldAngleToParentLocal(e.parentInvRot, newWorldAng)
+                local np = math.round(math.normalizeAngle(localAng[1]), 2)
+                local ny = math.round(math.normalizeAngle(localAng[2]), 2)
+                local nr = math.round(math.normalizeAngle(localAng[3]), 2)
+                local a = e.node.transform.ang
+                if a[1] ~= np or a[2] ~= ny or a[3] ~= nr then
+                    a[1], a[2], a[3] = np, ny, nr
+                    sceneGraph:notifyNodeUpdated(e.id)
+                end
+            end
+            dd.feedbackText = string.format("Rotate %s: %+.1f deg%s", axisLabel, deltaDeg, shift and " [15 deg]" or "")
+
+        elseif tool == "scale" then
+            local factor = 1.0
+            if axis == "uniform" then
+                local pxDelta = (ui.mx - dd.startMouseX) - (ui.my - dd.startMouseY)
+                factor = 1.0 + pxDelta * 0.008
+            else
+                local hit = trace.intersectRayWithPlane(camera.camPos, rayDir * RAY_LEN, dd.origin, dd.planeNormal)
+                if not hit then return end
+                local delta = (hit - dd.origin):dot(dd.axisDir) - dd.startProj
+                factor = 1.0 + (delta / math.max(10, dd.handleLen))
+            end
+            if shift then
+                factor = math.max(0.1, math.round(factor / 0.1) * 0.1)
+            end
+            factor = math.clamp(factor, MIN_SCALE, MAX_SCALE)
+            dd.axisVisualFactor = factor
+
+            local compIdx = (axis == "x") and 1 or ((axis == "y") and 2 or ((axis == "z") and 3 or 0))
+            for i = 1, #dd.entries do
+                local e = dd.entries[i]
+                local bs = e.before.scale
+                local sx, sy, sz = bs[1], bs[2], bs[3]
+                if compIdx == 0 then
+                    sx = math.clamp(math.round(bs[1] * factor, 3), MIN_SCALE, MAX_SCALE)
+                    sy = math.clamp(math.round(bs[2] * factor, 3), MIN_SCALE, MAX_SCALE)
+                    sz = math.clamp(math.round(bs[3] * factor, 3), MIN_SCALE, MAX_SCALE)
+                elseif compIdx == 1 then
+                    sx = math.clamp(math.round(bs[1] * factor, 3), MIN_SCALE, MAX_SCALE)
+                elseif compIdx == 2 then
+                    sy = math.clamp(math.round(bs[2] * factor, 3), MIN_SCALE, MAX_SCALE)
+                elseif compIdx == 3 then
+                    sz = math.clamp(math.round(bs[3] * factor, 3), MIN_SCALE, MAX_SCALE)
+                end
+                local s = e.node.transform.scale
+                if s[1] ~= sx or s[2] ~= sy or s[3] ~= sz then
+                    s[1], s[2], s[3] = sx, sy, sz
+                    sceneGraph:notifyNodeUpdated(e.id)
+                end
+            end
+            local lbl = (axis == "uniform") and "Uniform" or axisLabel
+            dd.feedbackText = string.format("Scale %s: %.2fx%s", lbl, factor, shift and " [Snap]" or "")
+        end
+    end
+
+    function Gizmos.finishDrag(sceneGraph, commands)
+        if not Gizmos.dragging or not Gizmos.dragData then
+            Gizmos.dragging = false
+            Gizmos.activeAxis = nil
+            Gizmos.dragData = nil
+            return false
+        end
+
+        local dd = Gizmos.dragData
+        local cmdEntries = {}
+        for i = 1, #dd.entries do
+            local e = dd.entries[i]
+            local node = sceneGraph:getNode(e.id)
+            if node and node.transform then
+                local cur = node.transform
+                local changed = (not sameVec3(e.before.pos, cur.pos))
+                    or (not sameVec3(e.before.ang, cur.ang))
+                    or (not sameVec3(e.before.scale, cur.scale))
+                if changed then
+                    cmdEntries[#cmdEntries + 1] = {
+                        id = e.id,
+                        before = e.before,
+                        after = {
+                            pos   = IR.cloneVec3(cur.pos),
+                            ang   = IR.cloneVec3(cur.ang),
+                            scale = IR.cloneVec3(cur.scale),
+                        },
+                    }
+                end
+            end
+        end
+
+        Gizmos.dragging = false
+        Gizmos.activeAxis = nil
+        Gizmos.dragData = nil
+        _lastPickKey = nil
+
+        if #cmdEntries > 0 and commands then
+            local toolName = string.upper(string.sub(dd.tool, 1, 1)) .. string.sub(dd.tool, 2)
+            local axisName = (dd.axis == "uniform") and "Uniform" or string.upper(dd.axis)
+            local cmd = Commands.createTransformCommand(sceneGraph, toolName .. " " .. axisName, cmdEntries)
+            commands:execute(cmd)
+            return true
+        end
+        return false
+    end
+
+    function Gizmos.cancelDrag(sceneGraph)
+        if not Gizmos.dragging or not Gizmos.dragData then
+            Gizmos.dragging = false
+            Gizmos.activeAxis = nil
+            Gizmos.dragData = nil
+            return false
+        end
+
+        local dd = Gizmos.dragData
+        for i = 1, #dd.entries do
+            local e = dd.entries[i]
+            local node = sceneGraph:getNode(e.id)
+            if node and node.transform then
+                local t = node.transform
+                t.pos[1], t.pos[2], t.pos[3] = e.before.pos[1], e.before.pos[2], e.before.pos[3]
+                t.ang[1], t.ang[2], t.ang[3] = e.before.ang[1], e.before.ang[2], e.before.ang[3]
+                t.scale[1], t.scale[2], t.scale[3] = e.before.scale[1], e.before.scale[2], e.before.scale[3]
+                sceneGraph:notifyNodeUpdated(e.id)
+            end
+        end
+
+        Gizmos.dragging = false
+        Gizmos.activeAxis = nil
+        Gizmos.dragData = nil
+        _lastPickKey = nil
+        return true
+    end
+
+    function Gizmos.update(ui, state, camera, sceneGraph, commands, vpRect, paused)
+        if Gizmos.dragging then
+            local dd = Gizmos.dragData
+            if not state.studioOpen or state.viewportLooking or paused
+                or not dd or state.activeTool ~= dd.tool then
+                Gizmos.finishDrag(sceneGraph, commands)
+                ui:release("gizmo_drag")
+                return
+            end
+
+            ui.hotId = "gizmo_" .. tostring(Gizmos.activeAxis)
+            if ui.leftDown then
+                updateDrag(ui, state, camera, sceneGraph)
+            else
+                Gizmos.finishDrag(sceneGraph, commands)
+                ui:release("gizmo_drag")
+            end
+            return
+        end
+
+        if paused or not state.studioOpen or state.viewportLooking
+            or (ui.hotId ~= nil) or (ui.activeId ~= nil)
+            or ui.autoScroll or ui._autoScrollConsumed then
+            Gizmos.hoveredAxis = nil
+            return
+        end
+
+        local axis = pickHandle(ui, state, camera, sceneGraph, vpRect)
+        Gizmos.hoveredAxis = axis
+        if axis then
+            ui.hotId = "gizmo_" .. axis
+            local tipAxis = (axis == "uniform") and "Uniform" or string.upper(axis)
+            if state.activeTool == "move" then
+                ui:setTooltip("Move " .. tipAxis .. " Axis (Drag | Shift: Grid Snap)")
+            elseif state.activeTool == "rotate" then
+                ui:setTooltip("Rotate " .. tipAxis .. " Ring (Drag | Shift: 15 deg Snap)")
+            elseif state.activeTool == "scale" then
+                ui:setTooltip("Scale " .. tipAxis .. " (Drag | Shift: 0.1x Snap)")
+            end
+            if ui.leftPressed then
+                if beginDrag(ui, state, camera, sceneGraph, axis) then
+                    ui:capture("gizmo_drag")
+                end
+            end
+        end
+    end
+
+    local function drawConeTip(tipPos, dir, u, v, coneLen, coneRad)
+        local base = tipPos - dir * coneLen
+        local pA = base + u * coneRad
+        local pB = base - u * coneRad
+        local pC = base + v * coneRad
+        local pD = base - v * coneRad
+        render.draw3DLine(tipPos, pA, false)
+        render.draw3DLine(tipPos, pB, false)
+        render.draw3DLine(tipPos, pC, false)
+        render.draw3DLine(tipPos, pD, false)
+        render.draw3DLine(pA, pC, false)
+        render.draw3DLine(pC, pB, false)
+        render.draw3DLine(pB, pD, false)
+        render.draw3DLine(pD, pA, false)
+    end
+
+    function Gizmos.draw3D(state, camera, sceneGraph)
+        if not state.studioOpen then return end
+        local tool = state.activeTool
+        if tool ~= "move" and tool ~= "rotate" and tool ~= "scale" then return end
+
+        local anchorId = getEffectiveTargets(sceneGraph)
+        if not anchorId then return end
+
+        local Theme = SOLACE.Theme
+        local origin, worldAng = getAnchorTransform(sceneGraph, anchorId)
+        local handleLen = getHandleLength(camera, origin)
+        local ax, ay, az = getToolAxes(tool, worldAng)
+        local hiAxis = Gizmos.dragging and Gizmos.activeAxis or Gizmos.hoveredAxis
+
+        if tool == "move" then
+            local defs = {
+                { "x", ax, ay, az },
+                { "y", ay, az, ax },
+                { "z", az, ax, ay },
+            }
+            for i = 1, 3 do
+                local name, dir, u, v = defs[i][1], defs[i][2], defs[i][3], defs[i][4]
+                local isHi = (hiAxis == name)
+                local col = isHi and COL_HILITE or axisColor(name)
+                if Gizmos.dragging and isHi then
+                    Theme.setColor(COL_GUIDE)
+                    render.draw3DLine(origin - dir * (handleLen * 2.5), origin + dir * (handleLen * 2.5), false)
+                end
+                Theme.setColor(col)
+                local tip = origin + dir * handleLen
+                render.draw3DLine(origin, tip, false)
+                if isHi then
+                    local off = u * math.max(0.4, handleLen * 0.014)
+                    render.draw3DLine(origin + off, tip + off, false)
+                    render.draw3DLine(origin - off, tip - off, false)
+                end
+                drawConeTip(tip + dir * (handleLen * 0.14), dir, u, v, handleLen * 0.22, handleLen * (isHi and 0.075 or 0.058))
+            end
+
+        elseif tool == "rotate" then
+            local radius = handleLen * 0.90
+            local ringDefs = {
+                { "x", ax, ay, az },
+                { "y", ay, az, ax },
+                { "z", az, ax, ay },
+            }
+            for i = 1, 3 do
+                local name, normal, u, v = ringDefs[i][1], ringDefs[i][2], ringDefs[i][3], ringDefs[i][4]
+                local isHi = (hiAxis == name)
+                Theme.setColor(isHi and COL_HILITE or axisColor(name))
+                local prevPt = origin + u * radius
+                for s = 1, RING_SEGS do
+                    local nextPt = origin + u * (COS_TABLE[s + 1] * radius) + v * (SIN_TABLE[s + 1] * radius)
+                    render.draw3DLine(prevPt, nextPt, false)
+                    if isHi then
+                        local off = normal * math.max(0.35, handleLen * 0.012)
+                        render.draw3DLine(prevPt + off, nextPt + off, false)
+                    end
+                    prevPt = nextPt
+                end
+            end
+
+            if Gizmos.dragging and Gizmos.dragData and not Gizmos.dragData.edgeOn then
+                local dd = Gizmos.dragData
+                if dd.startVec and dd.curVec then
+                    Theme.setColor(COL_GUIDE)
+                    render.draw3DLine(dd.origin, dd.origin + dd.startVec * radius, false)
+                    Theme.setColor(COL_HILITE)
+                    render.draw3DLine(dd.origin, dd.origin + dd.curVec * radius, false)
+                end
+            end
+
+        elseif tool == "scale" then
+            local defs = {
+                { "x", ax, ay, az },
+                { "y", ay, az, ax },
+                { "z", az, ax, ay },
+            }
+            local boxHalf = handleLen * 0.065
+            local boxMin = Vector(-boxHalf, -boxHalf, -boxHalf)
+            local boxMax = Vector(boxHalf, boxHalf, boxHalf)
+            local drawAng = worldAng or Angle(0, 0, 0)
+
+            for i = 1, 3 do
+                local name, dir, u = defs[i][1], defs[i][2], defs[i][3]
+                local isHi = (hiAxis == name)
+                local stretch = (Gizmos.dragging and isHi and Gizmos.dragData)
+                    and math.clamp(Gizmos.dragData.axisVisualFactor or 1, 0.35, 1.8) or 1.0
+                local tip = origin + dir * (handleLen * stretch)
+                Theme.setColor(isHi and COL_HILITE or axisColor(name))
+                render.draw3DLine(origin, tip, false)
+                if isHi then
+                    local off = u * math.max(0.4, handleLen * 0.014)
+                    render.draw3DLine(origin + off, tip + off, false)
+                end
+                render.draw3DWireframeBox(tip, drawAng, boxMin, boxMax, false)
+            end
+
+            local uHalf = handleLen * ((hiAxis == "uniform") and 0.115 or 0.09)
+            Theme.setColor((hiAxis == "uniform") and COL_HILITE or COL_UNIFORM)
+            render.draw3DWireframeBox(origin, drawAng, Vector(-uHalf, -uHalf, -uHalf), Vector(uHalf, uHalf, uHalf), false)
+        end
+    end
+
+    function Gizmos.drawOverlay(ui, state, vpRect)
+        if not state.studioOpen or not Gizmos.dragging or not Gizmos.dragData then return end
+        local dd = Gizmos.dragData
+        local text = dd.feedbackText
+        if not text or text == "" then return end
+
+        local Theme = SOLACE.Theme
+        Theme.setFont(Theme.Fonts.BodyBold)
+        local tw = render.getTextSize(text) or 120
+        local hint = "Shift: Snap  |  Esc: Cancel"
+        Theme.setFont(Theme.Fonts.Small)
+        local hw = render.getTextSize(hint) or 130
+        local pw = math.max(tw, hw) + 22
+        local ph = 42
+
+        local minX = vpRect and (vpRect.x + 8) or 8
+        local maxX = vpRect and (vpRect.x + vpRect.w - pw - 8) or (ui.scrW - pw - 8)
+        local minY = vpRect and (vpRect.y + 8) or 8
+        local maxY = vpRect and (vpRect.y + vpRect.h - ph - 8) or (ui.scrH - ph - 8)
+
+        local px = math.clamp(ui.mx + 18, minX, math.max(minX, maxX))
+        local py = math.clamp(ui.my - 28, minY, math.max(minY, maxY))
+
+        Theme.drawRoundedRect(4, px, py, pw, ph, Theme.C.tooltipBg, 240)
+        Theme.setColor(axisColor(dd.axis))
+        render.drawRectFast(px, py + 3, 3, ph - 6)
+        Theme.setColor(Theme.C.borderLight)
+        render.drawRectOutline(px, py, pw, ph, 1)
+
+        Theme.setFont(Theme.Fonts.BodyBold)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(px + 10, py + 12, text, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        Theme.setFont(Theme.Fonts.Small)
+        Theme.setColor(Theme.C.textMuted)
+        render.drawSimpleText(px + 10, py + 30, hint, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+    end
 
     SOLACE.Gizmos = Gizmos
 end)(SOLACE) end
@@ -5088,8 +5966,6 @@ do (function(SOLACE)
     local Toolbar = {}
     local _brandW = nil
     local TOOLBAR_UPCOMING = {
-        { id = "undo",   icon = "undo",   w = 30, tip = "Undo — Arriving in Phase 3" },
-        { id = "redo",   icon = "redo",   w = 30, tip = "Redo — Arriving in Phase 3" },
         { id = "save",   icon = "save",   w = 56, label = "Save",   tip = "Save Project — Arriving in Phase 12" },
         { id = "export", icon = "export", w = 68, label = "Export", tip = "Export StarfallEx Lua — Arriving in Phase 13" },
     }
@@ -5223,7 +6099,11 @@ do (function(SOLACE)
                 tooltip = tool.desc,
             })
             if clicked and tool.ready then
-                state.activeTool = tool.id
+                if actions.setTool then
+                    actions.setTool(tool.id)
+                else
+                    state.activeTool = tool.id
+                end
             end
             cx = cx + tw + 4
         end
@@ -5295,11 +6175,40 @@ do (function(SOLACE)
             cx = cx + statsW + 4
         end
 
-        -- Upcoming Transport / History / Project buttons
+        -- History (Undo/Redo) & Upcoming Project buttons
         if cx + 40 <= maxLeftX then
             Theme.setColor(Theme.C.border)
             render.drawLine(cx + 2, y + 7, cx + 2, y + h - 7)
             cx = cx + 10
+
+            if cx + 30 <= maxLeftX then
+                local undoTip = actions.canUndo
+                    and ("Undo: " .. (actions.undoLabel or "Edit") .. " (Ctrl+Z)")
+                    or "Undo (Nothing to undo)"
+                if Widgets.button(ui, "tb_undo", cx, by, 30, btnH, nil, {
+                    icon = "undo",
+                    disabled = not actions.canUndo,
+                    tooltip = undoTip,
+                }) then
+                    if actions.undo then actions.undo() end
+                end
+                cx = cx + 34
+            end
+
+            if cx + 30 <= maxLeftX then
+                local redoTip = actions.canRedo
+                    and ("Redo: " .. (actions.redoLabel or "Edit") .. " (Ctrl+Y)")
+                    or "Redo (Nothing to redo)"
+                if Widgets.button(ui, "tb_redo", cx, by, 30, btnH, nil, {
+                    icon = "redo",
+                    disabled = not actions.canRedo,
+                    tooltip = redoTip,
+                }) then
+                    if actions.redo then actions.redo() end
+                end
+                cx = cx + 34
+            end
+
             for _, item in ipairs(TOOLBAR_UPCOMING) do
                 if cx + item.w > maxLeftX then break end
                 Widgets.button(ui, "tb_" .. item.id, cx, by, item.w, btnH, item.label, {
@@ -5727,15 +6636,38 @@ do (function(SOLACE)
                         end
                     end
                     curY = curY + rowH + 6
+
+                    if curY + rowH >= by and curY <= visBottom then
+                        local thirdW = math.floor((innerW - 8) / 3)
+                        if Widgets.button(ui, "prop_tool_move", bx + pad, curY, thirdW, rowH, "Move", {
+                            active = (state.activeTool == "move"),
+                            tooltip = "Switch to 3D Move Gizmo (2)",
+                        }) then
+                            if actions.setTool then actions.setTool("move") else state.activeTool = "move" end
+                        end
+                        if Widgets.button(ui, "prop_tool_rot", bx + pad + thirdW + 4, curY, thirdW, rowH, "Rotate", {
+                            active = (state.activeTool == "rotate"),
+                            tooltip = "Switch to 3D Rotate Gizmo (E / 3)",
+                        }) then
+                            if actions.setTool then actions.setTool("rotate") else state.activeTool = "rotate" end
+                        end
+                        if Widgets.button(ui, "prop_tool_scl", bx + pad + (thirdW + 4) * 2, curY, innerW - (thirdW + 4) * 2, rowH, "Scale", {
+                            active = (state.activeTool == "scale"),
+                            tooltip = "Switch to 3D Scale Gizmo (R / 4)",
+                        }) then
+                            if actions.setTool then actions.setTool("scale") else state.activeTool = "scale" end
+                        end
+                    end
+                    curY = curY + rowH + 6
                 end
 
                 local nh = 64
                 if curY + nh >= by and curY <= visBottom then
                     nh = Widgets.phaseNotice(
                         bx + pad, curY, innerW,
-                        "Transform Gizmos",
-                        { "Move / Rotate / Scale & numeric", "boxes arrive in Phase 3-4." },
-                        "P3-4"
+                        "Numeric Transforms",
+                        { "Use 3D Move/Rotate/Scale gizmos;", "numeric edit boxes arrive in Phase 4." },
+                        "Phase 4"
                     )
                 end
                 curY = curY + nh + 8
@@ -7007,6 +7939,7 @@ do (function(SOLACE)
     local ViewportGrid = SOLACE.ViewportGrid
     local Freecam      = SOLACE.Freecam
     local Selection    = SOLACE.Selection
+    local Gizmos       = SOLACE.Gizmos
     local Toolbar      = SOLACE.Toolbar
     local Toolbox      = SOLACE.Toolbox
     local Explorer     = SOLACE.Explorer
@@ -7112,6 +8045,9 @@ do (function(SOLACE)
     local function setStudioOpen(open)
         state.studioOpen = open
         if not open then
+            if Gizmos.dragging then
+                Gizmos.finishDrag(sceneGraph, commands)
+            end
             state.viewportLooking = false
             ui.focusedInputId = nil
             ui.activeId = nil
@@ -7151,9 +8087,38 @@ do (function(SOLACE)
 
     local actions = {}
     actions.hasSelection = false
+    actions.canUndo = false
+    actions.canRedo = false
+    actions.undoLabel = nil
+    actions.redoLabel = nil
 
     function actions.toggleStudio(open)
         setStudioOpen(open)
+    end
+
+    function actions.setTool(toolId)
+        if state.activeTool == toolId then return end
+        if Gizmos.dragging then
+            Gizmos.finishDrag(sceneGraph, commands)
+            ui:release("gizmo_drag")
+        end
+        state.activeTool = toolId
+    end
+
+    function actions.undo()
+        if Gizmos.dragging then
+            Gizmos.cancelDrag(sceneGraph)
+            ui:release("gizmo_drag")
+        end
+        return commands:undo()
+    end
+
+    function actions.redo()
+        if Gizmos.dragging then
+            Gizmos.cancelDrag(sceneGraph)
+            ui:release("gizmo_drag")
+        end
+        return commands:redo()
     end
 
     function actions.resolveOrigin()
@@ -7254,6 +8219,9 @@ do (function(SOLACE)
     hook.add("HUDDisconnected", "solace_hud_disconnected", function(ent, ply)
         if ply == player() then
             hudConnected = false
+            if Gizmos.dragging then
+                Gizmos.finishDrag(sceneGraph, commands)
+            end
             state.viewportLooking = false
             ui.focusedInputId = nil
             ui.activeId = nil
@@ -7321,6 +8289,12 @@ do (function(SOLACE)
 
         if not state.studioOpen or isOverlayOrUnfocused() then return end
 
+        if key == KEY.ESCAPE and Gizmos.dragging then
+            Gizmos.cancelDrag(sceneGraph)
+            ui:release("gizmo_drag")
+            return
+        end
+
         if key == KEY.ESCAPE and ui.autoScroll then
             ui:cancelAutoScroll()
             return
@@ -7330,10 +8304,32 @@ do (function(SOLACE)
             return
         end
 
+        local ctrl = hasPermission("input") and input.isControlDown() or false
+        local shift = hasPermission("input") and input.isShiftDown() or false
+        if ctrl then
+            if key == KEY.Z then
+                if shift then
+                    actions.redo()
+                else
+                    actions.undo()
+                end
+                return
+            elseif key == KEY.Y then
+                actions.redo()
+                return
+            end
+        end
+
         if key == KEY.G then
             state.grid.enabled = not state.grid.enabled
-        elseif key == KEY.Q then
-            state.activeTool = "select"
+        elseif key == KEY.Q or key == KEY.KEY1 or key == KEY["1"] then
+            actions.setTool("select")
+        elseif key == KEY.KEY2 or key == KEY["2"] then
+            actions.setTool("move")
+        elseif key == KEY.E or key == KEY.KEY3 or key == KEY["3"] then
+            actions.setTool("rotate")
+        elseif key == KEY.R or key == KEY.KEY4 or key == KEY["4"] then
+            actions.setTool("scale")
         elseif key == KEY.F then
             actions.focusSelected()
         elseif key == KEY.DELETE then
@@ -7370,6 +8366,7 @@ do (function(SOLACE)
         if isOverlayOrUnfocused() or timer.realtime() < lowCpuUntil or getCpuRatio() > 0.62 then return end
         ViewportGrid.draw3D(state)
         Selection.draw3D(state, camera, sceneGraph, runtime)
+        Gizmos.draw3D(state, camera, sceneGraph)
     end)
 
     hook.add("PostDrawTranslucentRenderables", "solace_viewport_sprites", function(depth, skybox, skybox3d)
@@ -7581,6 +8578,10 @@ do (function(SOLACE)
 
         local cpuRatio = getCpuRatio()
         if cpuRatio > 0.78 or isOverlayOrUnfocused() then
+            if Gizmos.dragging then
+                Gizmos.finishDrag(sceneGraph, commands)
+                ui:release("gizmo_drag")
+            end
             return
         end
         local overlayPaused = (now < lowCpuUntil)
@@ -7621,6 +8622,10 @@ do (function(SOLACE)
             local sel = sceneGraph:getSelectedNode()
             local selIds = sceneGraph:getSelectedIds()
             actions.hasSelection = (sel ~= nil and sel.id ~= sceneGraph:getRootId())
+            actions.canUndo = commands:canUndo()
+            actions.canRedo = commands:canRedo()
+            actions.undoLabel = commands:getUndoLabel()
+            actions.redoLabel = commands:getRedoLabel()
 
             local actId = ui.activeId
             local focId = ui.focusedInputId
@@ -7634,6 +8639,7 @@ do (function(SOLACE)
             local winFlags = state.windows and (tostring(state.windows.demo) .. tostring(state.windows.settings) .. tostring(state.windows.console)) or ""
             local fltFlags = state.floatingPanels and (tostring(state.floatingPanels.toolbox) .. tostring(state.floatingPanels.explorer) .. tostring(state.floatingPanels.properties) .. tostring(state.floatingPanels.timeline)) or ""
             local tbSig = tv .. "|" .. state.activeTool .. ":" .. tostring(actions.hasSelection)
+                .. ":" .. tostring(commands._version or 1)
                 .. ":" .. tostring(state.grid.enabled) .. tostring(state.grid.showAxes) .. tostring(state.grid.showTelemetry)
                 .. ":" .. tostring(state.panels.toolbox) .. tostring(state.panels.explorer) .. tostring(state.panels.properties) .. tostring(state.panels.timeline)
                 .. ":" .. winFlags .. ":" .. fltFlags
@@ -7662,7 +8668,7 @@ do (function(SOLACE)
             local c = state.camera
             local g = state.grid
             local s = state.sections
-            local propSig = tv .. "|" .. sceneGraph._version .. "|" .. tostring(sel and sel.id) .. "|" .. tostring(sel and sel.name)
+            local propSig = tv .. "|" .. sceneGraph._version .. "|" .. state.activeTool .. "|" .. tostring(sel and sel.id) .. "|" .. tostring(sel and sel.name)
                 .. "|" .. tostring(sel and sel.visible) .. "|" .. #selIds .. "|" .. selXform
                 .. "|" .. c.speed .. ":" .. c.boostMult .. ":" .. c.sensitivity .. ":" .. c.fov .. ":" .. c.smoothing
                 .. "|" .. tostring(g.enabled) .. ":" .. g.spacing .. ":" .. g.halfExtents .. ":" .. g.originMode
@@ -7696,7 +8702,15 @@ do (function(SOLACE)
                 ImGui.DrawPopups(ui)
                 ImGui.DrawNotifications(ui, layout)
 
-                -- Viewport raycast hover & click selection (only when no UI widget/splitter/floating window is hovered/active)
+                -- Interactive 3D transform gizmo picking & dragging (before object selection so gizmo handles capture clicks)
+                if Gizmos.dragging or not ImGui.isPointOverAnyWindow(ui.mx, ui.my) then
+                    Gizmos.update(ui, state, camera, sceneGraph, commands, rects.viewport, overlayPaused)
+                else
+                    Gizmos.hoveredAxis = nil
+                end
+                Gizmos.drawOverlay(ui, state, rects.viewport)
+
+                -- Viewport raycast hover & click selection (only when no UI widget/gizmo/splitter/floating window is hovered/active)
                 if ui.hotId == nil and ui.activeId == nil and not ui.autoScroll and not ui._autoScrollConsumed
                     and not ImGui.isPointOverAnyWindow(ui.mx, ui.my) then
                     Selection.pickAtCursor(ui, state, camera, sceneGraph, runtime, rects.viewport)
@@ -7704,6 +8718,9 @@ do (function(SOLACE)
                 else
                     Selection.hoveredId = nil
                 end
+            elseif Gizmos.dragging then
+                Gizmos.finishDrag(sceneGraph, commands)
+                ui:release("gizmo_drag")
             end
         end)
 
