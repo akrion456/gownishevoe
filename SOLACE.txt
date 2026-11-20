@@ -235,7 +235,7 @@ do (function(SOLACE)
                 showTelemetry = true,
                 showOrientationGizmo = true,
                 spacing = 32,
-                halfExtents = 10,
+                halfExtents = 8,
                 majorEvery = 4,
                 originMode = "chip",
                 originPos = { 0, 0, 0 },
@@ -684,6 +684,12 @@ do (function(SOLACE)
             _selectedMap = {},
             _primarySelectedId = nil,
             _dirty = false,
+            _version = 1,
+            _flatCacheVersion = -1,
+            _flatCacheQuery = nil,
+            _flatCache = nil,
+            _nodeCountVersion = -1,
+            _nodeCountCache = 0,
         }, SceneGraph)
 
         -- Create initial StudioCamera IR node
@@ -788,10 +794,15 @@ do (function(SOLACE)
 
     function SceneGraph:markDirty()
         self._dirty = true
+        self._version = (self._version or 0) + 1
         self._project.modifiedAt = os.time()
         if self._events then
             self._events:emit("sceneDirty", self._project)
         end
+    end
+
+    function SceneGraph:bumpHierarchyVersion()
+        self._version = (self._version or 0) + 1
     end
 
     function SceneGraph:generateId(prefix)
@@ -979,19 +990,28 @@ do (function(SOLACE)
     end
 
     function SceneGraph:getNodeCount()
+        if self._nodeCountVersion == self._version then
+            return self._nodeCountCache
+        end
         local count = 0
         for id in pairs(self._project.nodes) do
             if id ~= self._project.rootId then
                 count = count + 1
             end
         end
+        self._nodeCountVersion = self._version
+        self._nodeCountCache = count
         return count
     end
 
     -- Flattened depth-first list for Explorer rendering (respects expanded state & optional search filter)
     function SceneGraph:getFlatHierarchy(searchQuery)
-        local out = {}
         local q = searchQuery and string.lower(string.trim(searchQuery)) or ""
+        if self._flatCache and self._flatCacheVersion == self._version and self._flatCacheQuery == q then
+            return self._flatCache
+        end
+
+        local out = {}
         local hasQuery = q ~= ""
 
         local function matches(node)
@@ -1030,6 +1050,9 @@ do (function(SOLACE)
         end
 
         walk(self._project.rootId, 0)
+        self._flatCacheVersion = self._version
+        self._flatCacheQuery = q
+        self._flatCache = out
         return out
     end
 
@@ -1889,11 +1912,36 @@ do (function(SOLACE)
         Theme.Fonts.Mono     = safeFont("DejaVu Sans Mono", 12, 400, true, "DebugFixed")
     end
 
-    function Theme.setColor(c, alphaOverride)
-        render.setRGBA(c[1], c[2], c[3], alphaOverride or c[4] or 255)
+    local _lastR, _lastG, _lastB, _lastA, _lastFont
+
+    function Theme.beginFrame()
+        _lastR, _lastG, _lastB, _lastA, _lastFont = nil, nil, nil, nil, nil
     end
 
-    -- Crisp procedural vector icons drawn with StarfallEx render primitives
+    function Theme.setRGBA(r, g, b, a)
+        a = a or 255
+        if _lastR ~= r or _lastG ~= g or _lastB ~= b or _lastA ~= a then
+            _lastR, _lastG, _lastB, _lastA = r, g, b, a
+            render.setRGBA(r, g, b, a)
+        end
+    end
+
+    function Theme.setColor(c, alphaOverride)
+        local r, g, b, a = c[1], c[2], c[3], alphaOverride or c[4] or 255
+        if _lastR ~= r or _lastG ~= g or _lastB ~= b or _lastA ~= a then
+            _lastR, _lastG, _lastB, _lastA = r, g, b, a
+            render.setRGBA(r, g, b, a)
+        end
+    end
+
+    function Theme.setFont(font)
+        if _lastFont ~= font then
+            _lastFont = font
+            render.setFont(font)
+        end
+    end
+
+    -- Crisp procedural vector icons drawn with minimal StarfallEx render primitives
     function Theme.drawIcon(name, x, y, size, c, alphaOverride)
         Theme.setColor(c or Theme.C.textSecondary, alphaOverride)
         local cx = x + size * 0.5
@@ -1901,34 +1949,22 @@ do (function(SOLACE)
         local r = size * 0.36
 
         if name == "cursor" then
-            -- Clean pointer arrow
             render.drawLine(x + 3, y + 2, x + 3, y + size - 3)
             render.drawLine(x + 3, y + 2, x + size - 3, cy + 1)
-            render.drawLine(x + size - 3, cy + 1, cx + 1, cy + 2)
-            render.drawLine(cx + 1, cy + 2, x + 3, y + size - 3)
+            render.drawLine(x + size - 3, cy + 1, x + 3, y + size - 3)
         elseif name == "move" then
-            -- 4-way arrows
             render.drawLine(cx, y + 2, cx, y + size - 2)
             render.drawLine(x + 2, cy, x + size - 2, cy)
-            render.drawLine(cx - 2, y + 4, cx, y + 2)
-            render.drawLine(cx + 2, y + 4, cx, y + 2)
-            render.drawLine(cx - 2, y + size - 4, cx, y + size - 2)
-            render.drawLine(cx + 2, y + size - 4, cx, y + size - 2)
-            render.drawLine(x + 4, cy - 2, x + 2, cy)
-            render.drawLine(x + 4, cy + 2, x + 2, cy)
-            render.drawLine(x + size - 4, cy - 2, x + size - 2, cy)
-            render.drawLine(x + size - 4, cy + 2, x + size - 2, cy)
+            render.drawRectFast(cx - 2, cy - 2, 4, 4)
         elseif name == "rotate" then
             render.drawCircle(cx, cy, r)
-            render.drawLine(cx + r - 2, cy - 2, cx + r + 1, cy + 1)
+            render.drawRectFast(cx + r - 2, cy - 2, 3, 3)
         elseif name == "scale" then
             render.drawRectOutline(x + 2, y + 2, size - 4, size - 4, 1)
             render.drawRectFast(x + size - 6, y + 2, 4, 4)
-            render.drawLine(cx - 2, cy + 2, x + size - 5, y + 5)
         elseif name == "pivot" then
             render.drawCircle(cx, cy, r * 0.7)
-            render.drawLine(cx, y + 2, cx, y + size - 2)
-            render.drawLine(x + 2, cy, x + size - 2, cy)
+            render.drawRectFast(cx - 1, cy - 1, 2, 2)
         elseif name == "grid" then
             local x0, y0 = x + 2, y + 2
             local s = size - 4
@@ -1940,17 +1976,13 @@ do (function(SOLACE)
             render.drawLine(x + 3, y + size - 3, x + size - 3, y + size - 3)
             render.drawLine(x + 3, y + size - 3, cx + 3, cy - 3)
         elseif name == "cube" or name == "holo" then
-            render.drawRectOutline(x + 3, y + 4, size - 7, size - 7, 1)
-            render.drawLine(x + 3, y + 4, x + 6, y + 2)
+            render.drawRectOutline(x + 2, y + 4, size - 6, size - 6, 1)
+            render.drawLine(x + 2, y + 4, x + 5, y + 2)
             render.drawLine(x + size - 4, y + 4, x + size - 1, y + 2)
-            render.drawLine(x + 6, y + 2, x + size - 1, y + 2)
-            render.drawLine(x + size - 1, y + 2, x + size - 1, y + size - 5)
-            render.drawLine(x + size - 4, y + size - 3, x + size - 1, y + size - 5)
         elseif name == "camera" then
             render.drawRectOutline(x + 2, y + 4, size - 7, size - 8, 1)
-            render.drawLine(x + size - 5, cy - 2, x + size - 2, cy - 4)
-            render.drawLine(x + size - 5, cy + 2, x + size - 2, cy + 4)
-            render.drawLine(x + size - 2, cy - 4, x + size - 2, cy + 4)
+            render.drawLine(x + size - 5, cy, x + size - 2, cy - 3)
+            render.drawLine(x + size - 5, cy, x + size - 2, cy + 3)
         elseif name == "play" then
             render.drawLine(x + 4, y + 3, x + size - 3, cy)
             render.drawLine(x + size - 3, cy, x + 4, y + size - 3)
@@ -1971,12 +2003,9 @@ do (function(SOLACE)
         elseif name == "save" then
             render.drawRectOutline(x + 3, y + 3, size - 6, size - 6, 1)
             render.drawRectFast(x + 5, y + 3, size - 10, 4)
-            render.drawRectFast(x + 5, y + size - 7, size - 10, 4)
         elseif name == "export" then
             render.drawRectOutline(x + 3, y + 6, size - 6, size - 9, 1)
             render.drawLine(cx, y + 2, cx, cy + 1)
-            render.drawLine(cx - 3, y + 5, cx, y + 2)
-            render.drawLine(cx + 3, y + 5, cx, y + 2)
         elseif name == "search" then
             render.drawCircle(cx - 1, cy - 1, r * 0.72)
             render.drawLine(cx + 2, cy + 2, x + size - 3, y + size - 3)
@@ -1987,14 +2016,13 @@ do (function(SOLACE)
         elseif name == "sparkle" or name == "burst" then
             render.drawLine(cx, y + 2, cx, y + size - 2)
             render.drawLine(x + 2, cy, x + size - 2, cy)
-            render.drawLine(x + 4, y + 4, x + size - 4, y + size - 4)
-            render.drawLine(x + size - 4, y + 4, x + 4, y + size - 4)
+            render.drawRectFast(cx - 1, cy - 1, 3, 3)
         elseif name == "stamp" then
             render.drawCircle(cx, cy, r)
-            render.drawFilledCircle(cx, cy, 2)
+            render.drawRectFast(cx - 2, cy - 2, 4, 4)
         elseif name == "eye" then
             render.drawCircle(cx, cy, r * 0.75)
-            render.drawFilledCircle(cx, cy, 2)
+            render.drawRectFast(cx - 1, cy - 1, 3, 3)
         elseif name == "reset" then
             render.drawRectOutline(x + 3, y + 3, size - 6, size - 6, 1)
             render.drawLine(x + 3, cy, x + size - 3, cy)
@@ -2107,6 +2135,7 @@ do (function(SOLACE)
             rightPressed = false,
             rightReleased = false,
             wheelDelta = 0,
+            _sliderFmt = {},
 
             activeId = nil,       -- ID currently captured by mouse drag
             hotId = nil,          -- ID currently hovered
@@ -2300,7 +2329,7 @@ do (function(SOLACE)
     function UIManager:drawTooltip()
         if not self._tooltipText or self._tooltipTimer < 0.35 or self.activeId then return end
 
-        render.setFont(Theme.Fonts.Small)
+        Theme.setFont(Theme.Fonts.Small)
         local tw, th = render.getTextSize(self._tooltipText)
         local padX, padY = 8, 5
         local bw = tw + padX * 2
@@ -2323,6 +2352,7 @@ do (function(SOLACE)
 
 
     local Widgets = {}
+    local EMPTY_OPTS = {}
 
     function Widgets.panelFrame(x, y, w, h, title, rightText)
         Theme.setColor(Theme.C.bgPanel)
@@ -2338,12 +2368,12 @@ do (function(SOLACE)
         Theme.setColor(Theme.C.border)
         render.drawLine(x + 1, y + hh, x + w - 1, y + hh)
 
-        render.setFont(Theme.Fonts.Header)
+        Theme.setFont(Theme.Fonts.Header)
         Theme.setColor(Theme.C.textPrimary)
         render.drawSimpleText(x + 10, y + hh * 0.5, title, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
 
         if rightText and rightText ~= "" then
-            render.setFont(Theme.Fonts.Small)
+            Theme.setFont(Theme.Fonts.Small)
             Theme.setColor(Theme.C.textMuted)
             render.drawSimpleText(x + w - 10, y + hh * 0.5, rightText, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
         end
@@ -2352,7 +2382,7 @@ do (function(SOLACE)
     end
 
     function Widgets.button(ui, id, x, y, w, h, label, opts)
-        opts = opts or {}
+        opts = opts or EMPTY_OPTS
         local disabled = opts.disabled == true
         local active = opts.active == true
         local hot, captured = ui:hitTest(id, x, y, w, h)
@@ -2379,19 +2409,21 @@ do (function(SOLACE)
         elseif hot then
             Theme.setColor(Theme.C.bgControlHover)
         else
-            Theme.setColor(opts.subtle and Theme.C.bgPanel or Theme.C.bgControl)
+            Theme.setColor(opts.subtle and Theme.C.bgPanelAlt or Theme.C.bgControl)
         end
         render.drawRectFast(x, y, w, h)
 
-        -- Border
+        -- Border (skip outline on idle subtle/disabled buttons to minimize draw calls)
         if active then
             Theme.setColor(Theme.C.accent)
+            render.drawRectOutline(x, y, w, h, 1)
         elseif hot and not disabled then
             Theme.setColor(Theme.C.borderLight)
-        else
-            Theme.setColor(Theme.C.border, disabled and 120 or 255)
+            render.drawRectOutline(x, y, w, h, 1)
+        elseif not opts.subtle and not disabled then
+            Theme.setColor(Theme.C.border)
+            render.drawRectOutline(x, y, w, h, 1)
         end
-        render.drawRectOutline(x, y, w, h, 1)
 
         local textColor = disabled and Theme.C.textDisabled
             or (active and Theme.C.accentBright or Theme.C.textPrimary)
@@ -2406,7 +2438,7 @@ do (function(SOLACE)
         end
 
         if label and label ~= "" then
-            render.setFont(opts.font or Theme.Fonts.Body)
+            Theme.setFont(opts.font or Theme.Fonts.Body)
             Theme.setColor(textColor)
             if opts.icon then
                 render.drawSimpleText(cursorX, y + h * 0.5, label, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
@@ -2416,7 +2448,7 @@ do (function(SOLACE)
         end
 
         if opts.badge and opts.badge ~= "" then
-            render.setFont(Theme.Fonts.Small)
+            Theme.setFont(Theme.Fonts.Small)
             local bw = 20
             local bh = 13
             local bx = x + w - bw - 3
@@ -2436,7 +2468,7 @@ do (function(SOLACE)
         local ctrlW = w - labelW
         local btnW = 20
 
-        render.setFont(Theme.Fonts.Body)
+        Theme.setFont(Theme.Fonts.Body)
         Theme.setColor(Theme.C.textSecondary)
         render.drawSimpleText(x, y + h * 0.5, label, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
 
@@ -2454,7 +2486,7 @@ do (function(SOLACE)
         Theme.setColor(Theme.C.border)
         render.drawRectOutline(midX, y, midW, h, 1)
 
-        render.setFont(Theme.Fonts.Mono)
+        Theme.setFont(Theme.Fonts.Mono)
         Theme.setColor(Theme.C.textPrimary)
         render.drawSimpleText(midX + midW * 0.5, y + h * 0.5, tostring(valueText), TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
 
@@ -2466,7 +2498,7 @@ do (function(SOLACE)
         local trackX = x + labelW
         local trackW = math.max(40, w - labelW)
 
-        render.setFont(Theme.Fonts.Body)
+        Theme.setFont(Theme.Fonts.Body)
         Theme.setColor(Theme.C.textSecondary)
         render.drawSimpleText(x, y + h * 0.5, label, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
 
@@ -2502,12 +2534,23 @@ do (function(SOLACE)
         Theme.setColor(captured and Theme.C.accent or (hot and Theme.C.bgSelection or Theme.C.accentSoft), captured and 140 or 180)
         render.drawRectFast(trackX + 1, y + 1, fillW, h - 2)
 
-        Theme.setColor((hot or captured) and Theme.C.borderFocus or Theme.C.border)
-        render.drawRectOutline(trackX, y, trackW, h, 1)
+        if hot or captured then
+            Theme.setColor(Theme.C.borderFocus)
+            render.drawRectOutline(trackX, y, trackW, h, 1)
+        end
 
-        render.setFont(Theme.Fonts.Mono)
+        local cache = ui._sliderFmt[id]
+        local txt
+        if cache and cache.val == newVal and cache.fmt == fmt then
+            txt = cache.str
+        else
+            txt = string.format(fmt or "%.0f", newVal)
+            ui._sliderFmt[id] = { val = newVal, fmt = fmt, str = txt }
+        end
+
+        Theme.setFont(Theme.Fonts.Mono)
         Theme.setColor(Theme.C.textPrimary)
-        render.drawSimpleText(trackX + trackW * 0.5, y + h * 0.5, string.format(fmt or "%.0f", newVal), TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+        render.drawSimpleText(trackX + trackW * 0.5, y + h * 0.5, txt, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
 
         return newVal, changed
     end
@@ -2534,7 +2577,7 @@ do (function(SOLACE)
         Theme.drawIcon("search", x + 6, y + (h - 12) * 0.5, 12, focused and Theme.C.accentBright or Theme.C.textMuted)
 
         ui:pushClip(x + 22, y + 1, math.max(0, w - 26 - clearW), h - 2)
-        render.setFont(Theme.Fonts.Body)
+        Theme.setFont(Theme.Fonts.Body)
         if #val > 0 then
             Theme.setColor(Theme.C.textPrimary)
             render.drawSimpleText(x + 24, y + h * 0.5, val, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
@@ -2573,7 +2616,7 @@ do (function(SOLACE)
 
         Theme.drawIcon(isOpen and "chevronDown" or "chevronRight", x + 6, y + (h - 12) * 0.5, 12, Theme.C.textSecondary)
 
-        render.setFont(Theme.Fonts.BodyBold)
+        Theme.setFont(Theme.Fonts.BodyBold)
         Theme.setColor(Theme.C.textPrimary)
         render.drawSimpleText(x + 22, y + h * 0.5, title, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
 
@@ -2584,11 +2627,11 @@ do (function(SOLACE)
     end
 
     function Widgets.keyValueRow(x, y, w, h, keyText, valText, valColor)
-        render.setFont(Theme.Fonts.Body)
+        Theme.setFont(Theme.Fonts.Body)
         Theme.setColor(Theme.C.textSecondary)
         render.drawSimpleText(x, y + h * 0.5, keyText, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
 
-        render.setFont(Theme.Fonts.Mono)
+        Theme.setFont(Theme.Fonts.Mono)
         Theme.setColor(valColor or Theme.C.textPrimary)
         render.drawSimpleText(x + w, y + h * 0.5, tostring(valText), TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
     end
@@ -2601,17 +2644,17 @@ do (function(SOLACE)
         Theme.setColor(Theme.C.border)
         render.drawRectOutline(x, y, w, h, 1)
 
-        render.setFont(Theme.Fonts.BodyBold)
+        Theme.setFont(Theme.Fonts.BodyBold)
         Theme.setColor(Theme.C.textPrimary)
         render.drawSimpleText(x + 10, y + 13, title, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
 
         if phaseBadge then
-            render.setFont(Theme.Fonts.Small)
+            Theme.setFont(Theme.Fonts.Small)
             Theme.setColor(Theme.C.accentBright)
             render.drawSimpleText(x + w - 10, y + 13, phaseBadge, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
         end
 
-        render.setFont(Theme.Fonts.Small)
+        Theme.setFont(Theme.Fonts.Small)
         Theme.setColor(Theme.C.textMuted)
         for i, line in ipairs(bodyLines) do
             render.drawSimpleText(x + 10, y + 26 + (i - 1) * lineH, line, TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
@@ -2882,15 +2925,24 @@ do (function(SOLACE)
         local span = n * spacing
 
         if g.enabled then
+            local skipZero = g.showAxes
+            Theme.setColor(Theme.C.gridMinor)
             for i = -n, n do
-                local isOriginLine = (i == 0)
-                local isMajor = (i % majorEvery == 0)
+                if not (i == 0 and skipZero) and (i % majorEvery ~= 0) then
+                    local offset = i * spacing
+                    setVec(pA, ox - span, oy + offset, oz)
+                    setVec(pB, ox + span, oy + offset, oz)
+                    render.draw3DLine(pA, pB, true)
 
-                if not (isOriginLine and g.showAxes) then
-                    local c = isOriginLine and Theme.C.gridMajor
-                        or (isMajor and Theme.C.gridMajor or Theme.C.gridMinor)
-                    render.setRGBA(c[1], c[2], c[3], c[4])
+                    setVec(pA, ox + offset, oy - span, oz)
+                    setVec(pB, ox + offset, oy + span, oz)
+                    render.draw3DLine(pA, pB, true)
+                end
+            end
 
+            Theme.setColor(Theme.C.gridMajor)
+            for i = -n, n do
+                if not (i == 0 and skipZero) and (i % majorEvery == 0) then
                     local offset = i * spacing
                     setVec(pA, ox - span, oy + offset, oz)
                     setVec(pB, ox + span, oy + offset, oz)
@@ -2939,37 +2991,44 @@ do (function(SOLACE)
         end
     end
 
+    local TRIAD_ITEMS = {
+        { label = "X", color = Theme.C.axisX, sx = 0, sy = 0, depth = 0 },
+        { label = "Y", color = Theme.C.axisY, sx = 0, sy = 0, depth = 0 },
+        { label = "Z", color = Theme.C.axisZ, sx = 0, sy = 0, depth = 0 },
+    }
+    local function sortTriad(a, b) return a.depth < b.depth end
+
     local function drawOrientationTriad(cx, cy, radius, ang)
+        local bgR = radius + 12
         Theme.setColor(Theme.C.hudPill)
-        render.drawFilledCircle(cx, cy, radius + 12)
+        render.drawRectFast(cx - bgR, cy - bgR, bgR * 2, bgR * 2)
         Theme.setColor(Theme.C.borderLight)
-        render.drawCircle(cx, cy, radius + 12)
+        render.drawRectOutline(cx - bgR, cy - bgR, bgR * 2, bgR * 2, 1)
 
         local fwd = ang:getForward()
         local right = ang:getRight()
         local up = ang:getUp()
 
-        local items = {}
         for i = 1, 3 do
             local a = AXIS_VECS[i]
-            items[i] = {
-                label = a.label,
-                color = a.color,
-                sx = a.vec:dot(right),
-                sy = -a.vec:dot(up),
-                depth = a.vec:dot(fwd),
-            }
+            local it = TRIAD_ITEMS[i]
+            it.label = a.label
+            it.color = a.color
+            it.sx = a.vec:dot(right)
+            it.sy = -a.vec:dot(up)
+            it.depth = a.vec:dot(fwd)
         end
-        table.sort(items, function(a, b) return a.depth < b.depth end)
+        table.sort(TRIAD_ITEMS, sortTriad)
 
-        render.setFont(Theme.Fonts.Small)
-        for _, item in ipairs(items) do
+        Theme.setFont(Theme.Fonts.Small)
+        for i = 1, 3 do
+            local item = TRIAD_ITEMS[i]
             local ex = cx + item.sx * radius
             local ey = cy + item.sy * radius
             local alpha = item.depth < -0.15 and 120 or 255
             Theme.setColor(item.color, alpha)
             render.drawLine(cx, cy, ex, ey)
-            render.drawFilledCircle(ex, ey, 7)
+            render.drawRectFast(ex - 6, ey - 6, 12, 12)
             Theme.setColor(Theme.C.textPrimary, alpha)
             render.drawSimpleText(ex, ey, item.label, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
         end
@@ -2995,6 +3054,15 @@ do (function(SOLACE)
         end
     end
 
+    local MODE_HINT_IDLE = "Freecam: Hold RMB + WASD/Space/Ctrl  |  Click: Select  |  F: Focus  |  Del: Delete"
+    local _cachedModeKey = nil
+    local _cachedModeStr = MODE_HINT_IDLE
+    local _cachedModeW = nil
+    local _lastStatsTime = -1
+    local _cachedStatsStr = ""
+    local _cachedStatsW = 0
+    local _cachedStatsCpuWarn = false
+
     function ViewportGrid.drawOverlay(state, ui, vpRect, fpsSmooth, camera, sceneGraph)
         local x, y, w, h = vpRect.x, vpRect.y, vpRect.w, vpRect.h
         if w < 40 or h < 40 then return end
@@ -3007,18 +3075,22 @@ do (function(SOLACE)
         -- Top-left Freecam / Selection hint pill
         local pillX = x + 10
         local pillY = y + 10
-        local modeStr = state.viewportLooking
-            and string.format("FREECAM  |  Speed: %d u/s (Shift: x%.1f)  |  Release RMB for cursor", state.camera.speed, state.camera.boostMult)
-            or "Freecam: Hold RMB + WASD/Space/Ctrl  |  Click: Select  |  F: Focus  |  Del: Delete"
-        render.setFont(Theme.Fonts.Small)
-        local tw = render.getTextSize(modeStr)
-        local pw = math.min(w - 110, tw + 18)
+        local modeKey = state.viewportLooking and (state.camera.speed .. ":" .. state.camera.boostMult) or "idle"
+        Theme.setFont(Theme.Fonts.Small)
+        if modeKey ~= _cachedModeKey or not _cachedModeW then
+            _cachedModeKey = modeKey
+            _cachedModeStr = state.viewportLooking
+                and string.format("FREECAM  |  Speed: %d u/s (Shift: x%.1f)  |  Release RMB for cursor", state.camera.speed, state.camera.boostMult)
+                or MODE_HINT_IDLE
+            _cachedModeW = render.getTextSize(_cachedModeStr)
+        end
+        local pw = math.min(w - 110, _cachedModeW + 18)
         Theme.setColor(Theme.C.hudPill)
         render.drawRectFast(pillX, pillY, pw, 22)
         Theme.setColor(state.viewportLooking and Theme.C.accent or Theme.C.border)
         render.drawRectOutline(pillX, pillY, pw, 22, 1)
         Theme.setColor(state.viewportLooking and Theme.C.accentBright or Theme.C.textSecondary)
-        render.drawSimpleText(pillX + 9, pillY + 11, modeStr, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+        render.drawSimpleText(pillX + 9, pillY + 11, _cachedModeStr, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
 
         -- Top-right 3D Orientation Triad synced with Freecam angle
         if state.grid.showOrientationGizmo and w > 180 and h > 140 then
@@ -3026,43 +3098,48 @@ do (function(SOLACE)
             drawOrientationTriad(x + w - 42, y + 42, 22, triadAng)
         end
 
-        -- Bottom-left live telemetry & selection readout
+        -- Bottom-left live telemetry & selection readout (throttled to 5 Hz)
         if state.grid.showTelemetry then
-            local cpuAvgFn = cpuAverage or quotaAverage
-            local cpuMaxFn = cpuMax or quotaMax
-            local cpuMs = cpuAvgFn and (cpuAvgFn() * 1000) or 0
-            local maxMs = cpuMaxFn and (cpuMaxFn() * 1000) or 15
-            local ramMb = ramUsed and (ramUsed() / 1024) or 0
-            local holos = (hologram and hologram.hologramsLeft) and hologram.hologramsLeft() or 0
-            local selCount = #sceneGraph:getSelectedIds()
-            local selNode = sceneGraph:getSelectedNode()
-            local selText = selCount == 0 and "None"
-                or (selCount == 1 and (selNode and selNode.name or "?") or (selCount .. " objects"))
+            Theme.setFont(Theme.Fonts.Mono)
+            local now = ui._frameTime
+            if now - _lastStatsTime >= 0.2 or _cachedStatsStr == "" then
+                _lastStatsTime = now
+                local cpuAvgFn = cpuAverage or quotaAverage
+                local cpuMaxFn = cpuMax or quotaMax
+                local cpuMs = cpuAvgFn and (cpuAvgFn() * 1000) or 0
+                local maxMs = cpuMaxFn and (cpuMaxFn() * 1000) or 15
+                local ramMb = ramUsed and (ramUsed() / 1024) or 0
+                local holos = (hologram and hologram.hologramsLeft) and hologram.hologramsLeft() or 0
+                local selCount = #sceneGraph:getSelectedIds()
+                local selNode = sceneGraph:getSelectedNode()
+                local selText = selCount == 0 and "None"
+                    or (selCount == 1 and (selNode and selNode.name or "?") or (selCount .. " objects"))
 
-            local statsStr = string.format(
-                "FPS: %d  |  CPU: %.2f/%.1fms  |  RAM: %.1fMB  |  Holos: %d  |  Cam: %d u/s FOV %d  |  Sel: %s",
-                math.round(fpsSmooth),
-                cpuMs,
-                maxMs,
-                ramMb,
-                holos,
-                state.camera.speed,
-                state.camera.fov,
-                selText
-            )
-            render.setFont(Theme.Fonts.Mono)
-            local sw = render.getTextSize(statsStr)
+                _cachedStatsStr = string.format(
+                    "FPS: %d  |  CPU: %.2f/%.1fms  |  RAM: %.1fMB  |  Holos: %d  |  Cam: %d u/s FOV %d  |  Sel: %s",
+                    math.round(fpsSmooth),
+                    cpuMs,
+                    maxMs,
+                    ramMb,
+                    holos,
+                    state.camera.speed,
+                    state.camera.fov,
+                    selText
+                )
+                _cachedStatsW = render.getTextSize(_cachedStatsStr)
+                _cachedStatsCpuWarn = (cpuMs / math.max(0.001, maxMs)) > 0.7
+            end
+
             local bx = x + 10
             local by = y + h - 30
-            local bw = math.min(w - 20, sw + 16)
+            local bw = math.min(w - 20, _cachedStatsW + 16)
             Theme.setColor(Theme.C.hudPill)
             render.drawRectFast(bx, by, bw, 20)
             Theme.setColor(Theme.C.border)
             render.drawRectOutline(bx, by, bw, 20, 1)
 
-            local cpuWarn = (cpuMs / math.max(0.001, maxMs)) > 0.7
-            Theme.setColor(cpuWarn and Theme.C.warning or Theme.C.textSecondary)
-            render.drawSimpleText(bx + 8, by + 10, statsStr, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+            Theme.setColor(_cachedStatsCpuWarn and Theme.C.warning or Theme.C.textSecondary)
+            render.drawSimpleText(bx + 8, by + 10, _cachedStatsStr, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
         end
 
         ui:popClip()
@@ -3074,6 +3151,19 @@ do (function(SOLACE)
 
 
     local Toolbar = {}
+    local _brandW = nil
+    local TOOLBAR_UPCOMING = {
+        { id = "undo",   icon = "undo",   w = 30, tip = "Undo — Arriving in Phase 3" },
+        { id = "redo",   icon = "redo",   w = 30, tip = "Redo — Arriving in Phase 3" },
+        { id = "save",   icon = "save",   w = 56, label = "Save",   tip = "Save Project — Arriving in Phase 12" },
+        { id = "export", icon = "export", w = 68, label = "Export", tip = "Export StarfallEx Lua — Arriving in Phase 13" },
+    }
+    local TOOLBAR_PANELS = {
+        { key = "timeline",   label = "TL",   tip = "Toggle Timeline Panel" },
+        { key = "properties", label = "Prop", tip = "Toggle Properties Panel" },
+        { key = "explorer",   label = "Exp",  tip = "Toggle Explorer Panel" },
+        { key = "toolbox",    label = "Box",  tip = "Toggle Toolbox Panel" },
+    }
 
     function Toolbar.draw(ui, state, layout, rect, actions)
         local x, y, w, h = rect.x, rect.y, rect.w, rect.h
@@ -3091,13 +3181,15 @@ do (function(SOLACE)
         local by = y + math.floor((h - btnH) * 0.5)
 
         -- Brand identity badge
-        render.setFont(Theme.Fonts.Title)
+        Theme.setFont(Theme.Fonts.Title)
         Theme.setColor(Theme.C.accentBright)
         render.drawSimpleText(cx, y + h * 0.5, Constants.APP_NAME, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
-        local nw = render.getTextSize(Constants.APP_NAME)
-        cx = cx + nw + 8
+        if not _brandW then
+            _brandW = render.getTextSize(Constants.APP_NAME)
+        end
+        cx = cx + _brandW + 8
 
-        render.setFont(Theme.Fonts.Small)
+        Theme.setFont(Theme.Fonts.Small)
         Theme.setColor(Theme.C.textMuted)
         render.drawSimpleText(cx, y + h * 0.5, "P2", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
         cx = cx + 22
@@ -3108,13 +3200,12 @@ do (function(SOLACE)
 
         -- Tool buttons
         for _, tool in ipairs(Constants.TOOLS) do
-            local tw = tool.ready and 72 or 84
+            local tw = tool.ready and 72 or 76
             if cx + tw > x + w - 260 then break end
             local clicked = Widgets.button(ui, "tb_tool_" .. tool.id, cx, by, tw, btnH, tool.label, {
                 icon = tool.icon,
                 active = tool.ready and (state.activeTool == tool.id),
                 disabled = not tool.ready,
-                badge = (not tool.ready) and ("P" .. tool.phase) or nil,
                 tooltip = tool.desc,
             })
             if clicked and tool.ready then
@@ -3184,17 +3275,11 @@ do (function(SOLACE)
         end
 
         -- Upcoming Transport / History / Project buttons
-        local upcoming = {
-            { id = "undo",   icon = "undo",   w = 30, tip = "Undo — Arriving in Phase 3" },
-            { id = "redo",   icon = "redo",   w = 30, tip = "Redo — Arriving in Phase 3" },
-            { id = "save",   icon = "save",   w = 56, label = "Save",   tip = "Save Project — Arriving in Phase 12" },
-            { id = "export", icon = "export", w = 68, label = "Export", tip = "Export StarfallEx Lua — Arriving in Phase 13" },
-        }
         if cx + 195 < x + w - 290 then
             Theme.setColor(Theme.C.border)
             render.drawLine(cx + 2, y + 7, cx + 2, y + h - 7)
             cx = cx + 10
-            for _, item in ipairs(upcoming) do
+            for _, item in ipairs(TOOLBAR_UPCOMING) do
                 if cx + item.w > x + w - 290 then break end
                 Widgets.button(ui, "tb_" .. item.id, cx, by, item.w, btnH, item.label, {
                     icon = item.icon,
@@ -3228,13 +3313,7 @@ do (function(SOLACE)
         end
         rx = rx - 8
 
-        local panelDefs = {
-            { key = "timeline",   label = "TL",   tip = "Toggle Timeline Panel" },
-            { key = "properties", label = "Prop", tip = "Toggle Properties Panel" },
-            { key = "explorer",   label = "Exp",  tip = "Toggle Explorer Panel" },
-            { key = "toolbox",    label = "Box",  tip = "Toggle Toolbox Panel" },
-        }
-        for _, p in ipairs(panelDefs) do
+        for _, p in ipairs(TOOLBAR_PANELS) do
             local pw = 40
             rx = rx - pw
             if rx > cx + 8 then
@@ -3259,6 +3338,8 @@ do (function(SOLACE)
     local Explorer = {
         _scrollY = 0,
         _contentH = 0,
+        _lastCount = -1,
+        _countStr = "0 nodes",
     }
 
     local KIND_ICONS = {
@@ -3277,8 +3358,11 @@ do (function(SOLACE)
         if rect.w <= 0 or rect.h <= 0 then return end
 
         local count = sceneGraph:getNodeCount()
-        local countStr = string.format("%d node%s", count, count == 1 and "" or "s")
-        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Explorer", countStr)
+        if count ~= Explorer._lastCount then
+            Explorer._lastCount = count
+            Explorer._countStr = string.format("%d node%s", count, count == 1 and "" or "s")
+        end
+        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Explorer", Explorer._countStr)
         if bw < 20 or bh < 60 then return end
 
         local pad = Theme.Metrics.pad
@@ -3387,6 +3471,7 @@ do (function(SOLACE)
                     )
                     if chevHot and ui.leftPressed then
                         node.expanded = not node.expanded
+                        sceneGraph:bumpHierarchyVersion()
                         handledClick = true
                     end
                 end
@@ -3432,11 +3517,11 @@ do (function(SOLACE)
                     textAlpha
                 )
 
-                render.setFont(isSel and Theme.Fonts.BodyBold or Theme.Fonts.Body)
+                Theme.setFont(isSel and Theme.Fonts.BodyBold or Theme.Fonts.Body)
                 Theme.setColor(isSel and Theme.C.textPrimary or Theme.C.textSecondary, textAlpha)
                 render.drawSimpleText(iconX + 18, curY + rowH * 0.5, node.name, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
 
-                render.setFont(Theme.Fonts.Small)
+                Theme.setFont(Theme.Fonts.Small)
                 Theme.setColor(Theme.C.textMuted, textAlpha)
                 render.drawSimpleText(eyeX - 6, curY + rowH * 0.5, node.kind, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
             end
@@ -3469,14 +3554,43 @@ do (function(SOLACE)
     local Properties = {
         _scrollY = 0,
         _contentH = 0,
+        _selCountLast = -1,
+        _selCountLabel = "0 selected",
+        _xformCache = {},
+        _rtCacheTime = -1,
+        _rtCpuStr = "",
+        _rtRamStr = "",
+        _rtHolosStr = "",
+        _rtCalcPerm = false,
+        _rtHoloPerm = false,
     }
+
+    local function fmtVecCached(cache, key, v, dec)
+        local x, y, z = v[1], v[2], v[3]
+        local c = cache[key]
+        if c and c.x == x and c.y == y and c.z == z and c.dec == dec then
+            return c.str
+        end
+        local str = Utils.fmtVec3(v, dec)
+        cache[key] = { x = x, y = y, z = z, dec = dec, str = str }
+        return str
+    end
 
     function Properties.draw(ui, state, sceneGraph, runtime, camera, rect, actions)
         if rect.w <= 0 or rect.h <= 0 then return end
 
         local sel = sceneGraph:getSelectedNode()
         local selCount = #sceneGraph:getSelectedIds()
-        local rightLabel = selCount > 1 and (selCount .. " selected") or (sel and sel.name or "No Selection")
+        local rightLabel
+        if selCount > 1 then
+            if selCount ~= Properties._selCountLast then
+                Properties._selCountLast = selCount
+                Properties._selCountLabel = selCount .. " selected"
+            end
+            rightLabel = Properties._selCountLabel
+        else
+            rightLabel = sel and sel.name or "No Selection"
+        end
         local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Properties", rightLabel)
         if bw < 20 or bh < 40 then return end
 
@@ -3493,235 +3607,325 @@ do (function(SOLACE)
         local innerW = bw - pad * 2 - (maxScroll > 0 and 8 or 0)
         local curY = by + pad - Properties._scrollY
         local startY = curY
+        local visBottom = by + bh
 
         -- 1. Selected Object
-        state.sections.selection = Widgets.sectionHeader(ui, "sec_selection", bx, curY, bw, 22, "Selection", state.sections.selection)
+        if curY + 22 >= by and curY <= visBottom then
+            state.sections.selection = Widgets.sectionHeader(ui, "sec_selection", bx, curY, bw, 22, "Selection", state.sections.selection)
+        end
         curY = curY + 26
         if state.sections.selection then
             if sel then
                 local isRoot = (sel.id == sceneGraph:getRootId())
 
                 if not isRoot then
-                    Widgets.textBox(
-                        ui,
-                        "prop_node_name_" .. sel.id,
-                        bx + pad,
-                        curY,
-                        innerW,
-                        22,
-                        function() return sel.name end,
-                        function(v) sceneGraph:renameNode(sel.id, v) end,
-                        "Object name...",
-                        "Rename selected object"
-                    )
+                    local nameGetter = function() return sel.name end
+                    local nameSetter = function(v) sceneGraph:renameNode(sel.id, v) end
+                    if curY + 22 >= by and curY <= visBottom then
+                        Widgets.textBox(
+                            ui,
+                            "prop_node_name_" .. sel.id,
+                            bx + pad,
+                            curY,
+                            innerW,
+                            22,
+                            nameGetter,
+                            nameSetter,
+                            "Object name...",
+                            "Rename selected object"
+                        )
+                    else
+                        ui:registerTextInput("prop_node_name_" .. sel.id, nameGetter, nameSetter)
+                    end
                     curY = curY + 26
                 end
 
-                Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Kind", sel.kind, Theme.C.accentBright)
+                if curY + 18 >= by and curY <= visBottom then
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Kind", sel.kind, Theme.C.accentBright)
+                end
                 curY = curY + 19
-                Widgets.keyValueRow(bx + pad, curY, innerW, 18, "IR ID", sel.id, Theme.C.textMuted)
+                if curY + 18 >= by and curY <= visBottom then
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "IR ID", sel.id, Theme.C.textMuted)
+                end
                 curY = curY + 19
 
                 if sel.appearance.model and sel.appearance.model ~= "" then
-                    local shortMdl = string.getFileFromFilename(sel.appearance.model) or sel.appearance.model
-                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Model", shortMdl, Theme.C.textSecondary)
+                    if curY + 18 >= by and curY <= visBottom then
+                        local shortMdl = string.getFileFromFilename(sel.appearance.model) or sel.appearance.model
+                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Model", shortMdl, Theme.C.textSecondary)
+                    end
                     curY = curY + 19
                 elseif sel.appearance.material and sel.appearance.material ~= "" then
-                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Material", sel.appearance.material, Theme.C.textSecondary)
+                    if curY + 18 >= by and curY <= visBottom then
+                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Material", sel.appearance.material, Theme.C.textSecondary)
+                    end
                     curY = curY + 19
                 end
 
                 if not isRoot then
-                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Position", Utils.fmtVec3(sel.transform.pos, 1))
+                    local xc = Properties._xformCache
+                    if xc._id ~= sel.id then
+                        Properties._xformCache = { _id = sel.id }
+                        xc = Properties._xformCache
+                    end
+                    if curY + 18 >= by and curY <= visBottom then
+                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Position", fmtVecCached(xc, "pos", sel.transform.pos, 1))
+                    end
                     curY = curY + 19
-                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Rotation", Utils.fmtVec3(sel.transform.ang, 1))
+                    if curY + 18 >= by and curY <= visBottom then
+                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Rotation", fmtVecCached(xc, "ang", sel.transform.ang, 1))
+                    end
                     curY = curY + 19
-                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Scale", Utils.fmtVec3(sel.transform.scale, 2))
+                    if curY + 18 >= by and curY <= visBottom then
+                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Scale", fmtVecCached(xc, "scale", sel.transform.scale, 2))
+                    end
                     curY = curY + 22
 
                     local entry = runtime:getEntry(sel.id)
                     if entry and entry.errorMsg then
-                        Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Runtime", entry.errorMsg, Theme.C.danger)
+                        if curY + 18 >= by and curY <= visBottom then
+                            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Runtime", entry.errorMsg, Theme.C.danger)
+                        end
                         curY = curY + 20
                     end
 
-                    local thirdW = math.floor((innerW - 8) / 3)
-                    if Widgets.button(ui, "prop_vis", bx + pad, curY, thirdW, rowH, sel.visible and "Visible" or "Hidden", {
-                        active = sel.visible,
-                        tooltip = "Toggle object visibility",
-                    }) then
-                        sceneGraph:toggleNodeVisible(sel.id)
-                    end
-                    if Widgets.button(ui, "prop_focus", bx + pad + thirdW + 4, curY, thirdW, rowH, "Focus", {
-                        tooltip = "Move Freecam to frame this object (F)",
-                    }) then
-                        actions.focusSelected()
-                    end
-                    if Widgets.button(ui, "prop_del", bx + pad + (thirdW + 4) * 2, curY, innerW - (thirdW + 4) * 2, rowH, "Delete", {
-                        tooltip = "Delete selected object(s) (Del)",
-                    }) then
-                        actions.deleteSelected()
+                    if curY + rowH >= by and curY <= visBottom then
+                        local thirdW = math.floor((innerW - 8) / 3)
+                        if Widgets.button(ui, "prop_vis", bx + pad, curY, thirdW, rowH, sel.visible and "Visible" or "Hidden", {
+                            active = sel.visible,
+                            tooltip = "Toggle object visibility",
+                        }) then
+                            sceneGraph:toggleNodeVisible(sel.id)
+                        end
+                        if Widgets.button(ui, "prop_focus", bx + pad + thirdW + 4, curY, thirdW, rowH, "Focus", {
+                            tooltip = "Move Freecam to frame this object (F)",
+                        }) then
+                            actions.focusSelected()
+                        end
+                        if Widgets.button(ui, "prop_del", bx + pad + (thirdW + 4) * 2, curY, innerW - (thirdW + 4) * 2, rowH, "Delete", {
+                            tooltip = "Delete selected object(s) (Del)",
+                        }) then
+                            actions.deleteSelected()
+                        end
                     end
                     curY = curY + rowH + 6
                 end
 
-                local nh = Widgets.phaseNotice(
-                    bx + pad, curY, innerW,
-                    "Interactive Transform Gizmos",
-                    { "Move / Rotate / Scale editing & numeric", "transform boxes arrive in Phase 3 & 4." },
-                    "Phase 3-4"
-                )
+                local nh = 64
+                if curY + nh >= by and curY <= visBottom then
+                    nh = Widgets.phaseNotice(
+                        bx + pad, curY, innerW,
+                        "Interactive Transform Gizmos",
+                        { "Move / Rotate / Scale editing & numeric", "transform boxes arrive in Phase 3 & 4." },
+                        "Phase 3-4"
+                    )
+                end
                 curY = curY + nh + 8
             else
-                Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Selection", "None (Click object in viewport)", Theme.C.textMuted)
+                if curY + 18 >= by and curY <= visBottom then
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Selection", "None (Click object in viewport)", Theme.C.textMuted)
+                end
                 curY = curY + 24
             end
         end
 
         -- 2. Freecam Camera (live)
-        state.sections.camera = Widgets.sectionHeader(ui, "sec_camera", bx, curY, bw, 22, "Freecam Camera", state.sections.camera)
+        if curY + 22 >= by and curY <= visBottom then
+            state.sections.camera = Widgets.sectionHeader(ui, "sec_camera", bx, curY, bw, 22, "Freecam Camera", state.sections.camera)
+        end
         curY = curY + 26
         if state.sections.camera then
             local c = state.camera
-            local spd, spdChanged = Widgets.slider(
-                ui, "prop_cam_spd", bx + pad, curY, innerW, rowH,
-                "Move Speed", c.speed, Constants.CAMERA_DEFAULTS.minSpeed, Constants.CAMERA_DEFAULTS.maxSpeed, 10, "%.0f u/s",
-                "Freecam base movement speed (Mouse wheel in viewport adjusts this)"
-            )
-            if spdChanged then c.speed = spd end
+            if curY + rowH >= by and curY <= visBottom then
+                local spd, spdChanged = Widgets.slider(
+                    ui, "prop_cam_spd", bx + pad, curY, innerW, rowH,
+                    "Move Speed", c.speed, Constants.CAMERA_DEFAULTS.minSpeed, Constants.CAMERA_DEFAULTS.maxSpeed, 10, "%.0f u/s",
+                    "Freecam base movement speed (Mouse wheel in viewport adjusts this)"
+                )
+                if spdChanged then c.speed = spd end
+            end
             curY = curY + rowH + 4
 
-            local bst, bstChanged = Widgets.slider(
-                ui, "prop_cam_bst", bx + pad, curY, innerW, rowH,
-                "Shift Boost", c.boostMult, 1.5, 6.0, 0.25, "x%.2f",
-                "Speed multiplier while holding Shift"
-            )
-            if bstChanged then c.boostMult = bst end
+            if curY + rowH >= by and curY <= visBottom then
+                local bst, bstChanged = Widgets.slider(
+                    ui, "prop_cam_bst", bx + pad, curY, innerW, rowH,
+                    "Shift Boost", c.boostMult, 1.5, 6.0, 0.25, "x%.2f",
+                    "Speed multiplier while holding Shift"
+                )
+                if bstChanged then c.boostMult = bst end
+            end
             curY = curY + rowH + 4
 
-            local sens, sensChanged = Widgets.slider(
-                ui, "prop_cam_sens", bx + pad, curY, innerW, rowH,
-                "Mouse Sens", c.sensitivity, 0.04, 0.50, 0.01, "%.2f",
-                "Mouse look sensitivity while holding Right Mouse Button"
-            )
-            if sensChanged then c.sensitivity = sens end
+            if curY + rowH >= by and curY <= visBottom then
+                local sens, sensChanged = Widgets.slider(
+                    ui, "prop_cam_sens", bx + pad, curY, innerW, rowH,
+                    "Mouse Sens", c.sensitivity, 0.04, 0.50, 0.01, "%.2f",
+                    "Mouse look sensitivity while holding Right Mouse Button"
+                )
+                if sensChanged then c.sensitivity = sens end
+            end
             curY = curY + rowH + 4
 
-            local fov, fovChanged = Widgets.slider(
-                ui, "prop_cam_fov", bx + pad, curY, innerW, rowH,
-                "Field of View", c.fov, 45, 115, 1, "%.0f deg",
-                "Viewport camera vertical field of view"
-            )
-            if fovChanged then c.fov = fov end
+            if curY + rowH >= by and curY <= visBottom then
+                local fov, fovChanged = Widgets.slider(
+                    ui, "prop_cam_fov", bx + pad, curY, innerW, rowH,
+                    "Field of View", c.fov, 45, 115, 1, "%.0f deg",
+                    "Viewport camera vertical field of view"
+                )
+                if fovChanged then c.fov = fov end
+            end
             curY = curY + rowH + 4
 
-            local sm, smChanged = Widgets.slider(
-                ui, "prop_cam_sm", bx + pad, curY, innerW, rowH,
-                "Smoothing", c.smoothing, 4, 40, 1, "%.0f",
-                "Camera motion damping (40 = crisp / instant)"
-            )
-            if smChanged then c.smoothing = sm end
+            if curY + rowH >= by and curY <= visBottom then
+                local sm, smChanged = Widgets.slider(
+                    ui, "prop_cam_sm", bx + pad, curY, innerW, rowH,
+                    "Smoothing", c.smoothing, 4, 40, 1, "%.0f",
+                    "Camera motion damping (40 = crisp / instant)"
+                )
+                if smChanged then c.smoothing = sm end
+            end
             curY = curY + rowH + 4
 
-            if Widgets.button(ui, "prop_cam_reset", bx + pad, curY, innerW, rowH, "Snap Camera to Player", {
-                icon = "camera",
-                tooltip = "Move Freecam back to your player's eye position",
-            }) then
-                camera:resetToPlayer()
+            if curY + rowH >= by and curY <= visBottom then
+                if Widgets.button(ui, "prop_cam_reset", bx + pad, curY, innerW, rowH, "Snap Camera to Player", {
+                    icon = "camera",
+                    tooltip = "Move Freecam back to your player's eye position",
+                }) then
+                    camera:resetToPlayer()
+                end
             end
             curY = curY + rowH + 8
         end
 
         -- 3. Viewport Grid (live)
-        state.sections.grid = Widgets.sectionHeader(ui, "sec_grid", bx, curY, bw, 22, "Viewport Grid", state.sections.grid)
+        if curY + 22 >= by and curY <= visBottom then
+            state.sections.grid = Widgets.sectionHeader(ui, "sec_grid", bx, curY, bw, 22, "Viewport Grid", state.sections.grid)
+        end
         curY = curY + 26
         if state.sections.grid then
             local g = state.grid
 
-            if Widgets.button(ui, "prop_grid_en", bx + pad, curY, innerW, rowH,
-                "Ground Grid: " .. (g.enabled and "Visible" or "Hidden"),
-                { active = g.enabled, icon = "grid", tooltip = "Toggle 3D reference grid (Hotkey: G)" }
-            ) then
-                g.enabled = not g.enabled
+            if curY + rowH >= by and curY <= visBottom then
+                if Widgets.button(ui, "prop_grid_en", bx + pad, curY, innerW, rowH,
+                    "Ground Grid: " .. (g.enabled and "Visible" or "Hidden"),
+                    { active = g.enabled, icon = "grid", tooltip = "Toggle 3D reference grid (Hotkey: G)" }
+                ) then
+                    g.enabled = not g.enabled
+                end
             end
             curY = curY + rowH + 4
 
-            local prevSp, nextSp = Widgets.stepper(
-                ui, "prop_grid_sp", bx + pad, curY, innerW, rowH,
-                "Cell Spacing", tostring(g.spacing) .. " u",
-                "Grid cell size in Hammer units"
-            )
-            if prevSp then g.spacing = Utils.cycleOption(Constants.GRID_SPACING_OPTIONS, g.spacing, -1) end
-            if nextSp then g.spacing = Utils.cycleOption(Constants.GRID_SPACING_OPTIONS, g.spacing, 1) end
+            if curY + rowH >= by and curY <= visBottom then
+                local prevSp, nextSp = Widgets.stepper(
+                    ui, "prop_grid_sp", bx + pad, curY, innerW, rowH,
+                    "Cell Spacing", tostring(g.spacing) .. " u",
+                    "Grid cell size in Hammer units"
+                )
+                if prevSp then g.spacing = Utils.cycleOption(Constants.GRID_SPACING_OPTIONS, g.spacing, -1) end
+                if nextSp then g.spacing = Utils.cycleOption(Constants.GRID_SPACING_OPTIONS, g.spacing, 1) end
+            end
             curY = curY + rowH + 4
 
-            local newExt, extChanged = Widgets.slider(
-                ui, "prop_grid_ext", bx + pad, curY, innerW, rowH,
-                "Grid Radius", g.halfExtents, 4, 24, 1, "%.0f cells",
-                "Number of grid cells from origin in each direction"
-            )
-            if extChanged then g.halfExtents = newExt end
+            if curY + rowH >= by and curY <= visBottom then
+                local newExt, extChanged = Widgets.slider(
+                    ui, "prop_grid_ext", bx + pad, curY, innerW, rowH,
+                    "Grid Radius", g.halfExtents, 4, 24, 1, "%.0f cells",
+                    "Number of grid cells from origin in each direction"
+                )
+                if extChanged then g.halfExtents = newExt end
+            end
             curY = curY + rowH + 8
         end
 
         -- 4. Studio Origin & HUD
-        state.sections.origin = Widgets.sectionHeader(ui, "sec_origin", bx, curY, bw, 22, "Studio Origin & HUD", state.sections.origin)
+        if curY + 22 >= by and curY <= visBottom then
+            state.sections.origin = Widgets.sectionHeader(ui, "sec_origin", bx, curY, bw, 22, "Studio Origin & HUD", state.sections.origin)
+        end
         curY = curY + 26
         if state.sections.origin then
             local g = state.grid
-            local prevOr, nextOr = Widgets.stepper(
-                ui, "prop_origin_mode", bx + pad, curY, innerW, rowH,
-                "Origin Anchor", string.upper(g.originMode),
-                "Center studio grid on Chip, Player, or World (0,0,0)"
-            )
-            if prevOr then
-                g.originMode = Utils.cycleOption(Constants.ORIGIN_MODES, g.originMode, -1)
-                actions.resolveOrigin()
-            end
-            if nextOr then
-                g.originMode = Utils.cycleOption(Constants.ORIGIN_MODES, g.originMode, 1)
-                actions.resolveOrigin()
+            if curY + rowH >= by and curY <= visBottom then
+                local prevOr, nextOr = Widgets.stepper(
+                    ui, "prop_origin_mode", bx + pad, curY, innerW, rowH,
+                    "Origin Anchor", string.upper(g.originMode),
+                    "Center studio grid on Chip, Player, or World (0,0,0)"
+                )
+                if prevOr then
+                    g.originMode = Utils.cycleOption(Constants.ORIGIN_MODES, g.originMode, -1)
+                    actions.resolveOrigin()
+                end
+                if nextOr then
+                    g.originMode = Utils.cycleOption(Constants.ORIGIN_MODES, g.originMode, 1)
+                    actions.resolveOrigin()
+                end
             end
             curY = curY + rowH + 4
 
-            local halfW = math.floor((innerW - 4) * 0.5)
-            if Widgets.button(ui, "prop_triad", bx + pad, curY, halfW, rowH, "3D Triad", {
-                active = g.showOrientationGizmo,
-                tooltip = "Toggle top-right 3D axis orientation widget",
-            }) then
-                g.showOrientationGizmo = not g.showOrientationGizmo
-            end
-            if Widgets.button(ui, "prop_telem", bx + pad + halfW + 4, curY, innerW - halfW - 4, rowH, "Telemetry", {
-                active = g.showTelemetry,
-                tooltip = "Toggle bottom-left performance telemetry pill",
-            }) then
-                g.showTelemetry = not g.showTelemetry
+            if curY + rowH >= by and curY <= visBottom then
+                local halfW = math.floor((innerW - 4) * 0.5)
+                if Widgets.button(ui, "prop_triad", bx + pad, curY, halfW, rowH, "3D Triad", {
+                    active = g.showOrientationGizmo,
+                    tooltip = "Toggle top-right 3D axis orientation widget",
+                }) then
+                    g.showOrientationGizmo = not g.showOrientationGizmo
+                end
+                if Widgets.button(ui, "prop_telem", bx + pad + halfW + 4, curY, innerW - halfW - 4, rowH, "Telemetry", {
+                    active = g.showTelemetry,
+                    tooltip = "Toggle bottom-left performance telemetry pill",
+                }) then
+                    g.showTelemetry = not g.showTelemetry
+                end
             end
             curY = curY + rowH + 8
         end
 
         -- 5. StarfallEx Quotas & Permissions
-        state.sections.quotas = Widgets.sectionHeader(ui, "sec_quotas", bx, curY, bw, 22, "StarfallEx Runtime", state.sections.quotas)
+        if curY + 22 >= by and curY <= visBottom then
+            state.sections.quotas = Widgets.sectionHeader(ui, "sec_quotas", bx, curY, bw, 22, "StarfallEx Runtime", state.sections.quotas)
+        end
         curY = curY + 26
         if state.sections.quotas then
-            local cpuAvgFn = cpuAverage or quotaAverage
-            local cpuMaxFn = cpuMax or quotaMax
-            local cpuMs = cpuAvgFn and (cpuAvgFn() * 1000) or 0
-            local maxMs = cpuMaxFn and (cpuMaxFn() * 1000) or 15
-            local ramMb = ramUsed and (ramUsed() / 1024) or 0
-            local holosLeft = (hologram and hologram.hologramsLeft) and hologram.hologramsLeft() or 0
-            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "CPU Avg / Cap", string.format("%.2f / %.1f ms", cpuMs, maxMs))
-            curY = curY + 19
-            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "RAM Used", string.format("%.1f MB", ramMb))
-            curY = curY + 19
-            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Holograms Left", tostring(holosLeft))
-            curY = curY + 19
-            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "render.calcview", hasPermission("render.calcview") and "OK" or "Denied",
-                hasPermission("render.calcview") and Theme.C.success or Theme.C.danger)
-            curY = curY + 19
-            Widgets.keyValueRow(bx + pad, curY, innerW, 18, "hologram.create", hasPermission("hologram.create") and "OK" or "Pending",
-                hasPermission("hologram.create") and Theme.C.success or Theme.C.warning)
-            curY = curY + 24
+            if curY + 95 >= by and curY <= visBottom then
+                local now = ui._frameTime
+                if now - Properties._rtCacheTime >= 0.2 or Properties._rtCpuStr == "" then
+                    Properties._rtCacheTime = now
+                    local cpuAvgFn = cpuAverage or quotaAverage
+                    local cpuMaxFn = cpuMax or quotaMax
+                    local cpuMs = cpuAvgFn and (cpuAvgFn() * 1000) or 0
+                    local maxMs = cpuMaxFn and (cpuMaxFn() * 1000) or 15
+                    local ramMb = ramUsed and (ramUsed() / 1024) or 0
+                    local holosLeft = (hologram and hologram.hologramsLeft) and hologram.hologramsLeft() or 0
+                    Properties._rtCpuStr = string.format("%.2f / %.1f ms", cpuMs, maxMs)
+                    Properties._rtRamStr = string.format("%.1f MB", ramMb)
+                    Properties._rtHolosStr = tostring(holosLeft)
+                    Properties._rtCalcPerm = hasPermission("render.calcview")
+                    Properties._rtHoloPerm = hasPermission("hologram.create")
+                end
+                if curY + 18 >= by and curY <= visBottom then
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "CPU Avg / Cap", Properties._rtCpuStr)
+                end
+                curY = curY + 19
+                if curY + 18 >= by and curY <= visBottom then
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "RAM Used", Properties._rtRamStr)
+                end
+                curY = curY + 19
+                if curY + 18 >= by and curY <= visBottom then
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "Holograms Left", Properties._rtHolosStr)
+                end
+                curY = curY + 19
+                if curY + 18 >= by and curY <= visBottom then
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "render.calcview", Properties._rtCalcPerm and "OK" or "Denied",
+                        Properties._rtCalcPerm and Theme.C.success or Theme.C.danger)
+                end
+                curY = curY + 19
+                if curY + 18 >= by and curY <= visBottom then
+                    Widgets.keyValueRow(bx + pad, curY, innerW, 18, "hologram.create", Properties._rtHoloPerm and "OK" or "Pending",
+                        Properties._rtHoloPerm and Theme.C.success or Theme.C.warning)
+                end
+                curY = curY + 24
+            else
+                curY = curY + 100
+            end
         end
 
         Properties._contentH = (curY - startY) + pad
@@ -3755,7 +3959,16 @@ do (function(SOLACE)
 
 
 
-    local Timeline = {}
+    local Timeline = {
+        _lastFrame = -1,
+        _lastTotal = -1,
+        _lastFps = -1,
+        _badgeStr = "",
+    }
+    local SEC_LABELS = {}
+    for s = 0, 120 do
+        SEC_LABELS[s] = tostring(s) .. "s"
+    end
 
     local function cycleFps(current, dir)
         local opts = Constants.FPS_OPTIONS
@@ -3773,15 +3986,20 @@ do (function(SOLACE)
         local tl = state.timeline
         local frameIdx = math.floor(tl.currentTime * tl.fps + 0.5)
         local totalFrames = math.floor(tl.duration * tl.fps + 0.5)
-        local rightBadge = string.format("%s / %s  |  F %d / %d (%d FPS)",
-            Utils.formatTimecode(tl.currentTime),
-            Utils.formatTimecode(tl.duration),
-            frameIdx,
-            totalFrames,
-            tl.fps
-        )
+        if frameIdx ~= Timeline._lastFrame or totalFrames ~= Timeline._lastTotal or tl.fps ~= Timeline._lastFps then
+            Timeline._lastFrame = frameIdx
+            Timeline._lastTotal = totalFrames
+            Timeline._lastFps = tl.fps
+            Timeline._badgeStr = string.format("%s / %s  |  F %d / %d (%d FPS)",
+                Utils.formatTimecode(tl.currentTime),
+                Utils.formatTimecode(tl.duration),
+                frameIdx,
+                totalFrames,
+                tl.fps
+            )
+        end
 
-        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Timeline", rightBadge)
+        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Timeline", Timeline._badgeStr)
         if bw < 160 or bh < 60 then return end
 
         ui:pushClip(bx, by, bw, bh)
@@ -3851,7 +4069,7 @@ do (function(SOLACE)
         local trackAreaH = math.max(0, bh - stripH)
 
         -- Wheel zoom inside ruler/tracks
-        if ui.wheelDelta ~= 0 and ui:pointInRect(rulerX, by, rulerW, bh) then
+        if ui.wheelDelta ~= 0 and ui:pointInRect(rulerX, by, rulerW, bh) and ui:isMouseInClip() then
             local factor = ui.wheelDelta > 0 and 1.15 or 0.87
             tl.zoom = math.clamp(tl.zoom * factor, 25, 320)
         end
@@ -3886,33 +4104,33 @@ do (function(SOLACE)
             render.drawRectFast(spanX1, trackAreaY, spanX2 - spanX1, trackAreaH)
         end
 
-        local secStep = tl.zoom < 45 and 2 or 1
-        local subDiv = tl.zoom >= 110 and 4 or 2
+        local secStep = tl.zoom < 50 and 2 or 1
+        local subDiv = tl.zoom >= 110 and 4 or (tl.zoom >= 65 and 2 or 1)
+        local minSec = math.max(0, math.floor((rulerX - 20 - originPX) / tl.zoom))
+        local maxSec = math.min(math.ceil(tl.duration), math.ceil((rulerX + rulerW + 20 - originPX) / tl.zoom))
 
-        render.setFont(Theme.Fonts.Small)
-        for sec = 0, math.ceil(tl.duration) do
+        Theme.setFont(Theme.Fonts.Small)
+        for sec = minSec, maxSec do
             local sx = originPX + sec * tl.zoom
-            if sx >= rulerX - 20 and sx <= rulerX + rulerW + 20 then
-                if sec % secStep == 0 then
-                    Theme.setColor(Theme.C.borderLight)
-                    render.drawLine(sx, rulerY + 12, sx, rulerY + stripH - 2)
-                    Theme.setColor(Theme.C.textSecondary)
-                    render.drawSimpleText(sx + 3, rulerY + 4, string.format("%ds", sec), TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            if sec % secStep == 0 then
+                Theme.setColor(Theme.C.borderLight)
+                render.drawLine(sx, rulerY + 12, sx, rulerY + stripH - 2)
+                Theme.setColor(Theme.C.textSecondary)
+                render.drawSimpleText(sx + 3, rulerY + 4, SEC_LABELS[sec] or (sec .. "s"), TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
 
-                    -- Vertical guide line into track body
-                    Theme.setColor(Theme.C.border, 120)
-                    render.drawLine(sx, trackAreaY, sx, trackAreaY + trackAreaH)
-                else
-                    Theme.setColor(Theme.C.border)
-                    render.drawLine(sx, rulerY + 18, sx, rulerY + stripH - 2)
-                end
+                -- Vertical guide line into track body
+                Theme.setColor(Theme.C.border, 110)
+                render.drawLine(sx, trackAreaY, sx, trackAreaY + trackAreaH)
+            else
+                Theme.setColor(Theme.C.border)
+                render.drawLine(sx, rulerY + 18, sx, rulerY + stripH - 2)
+            end
 
-                if sec < tl.duration then
-                    for sub = 1, subDiv - 1 do
-                        local subX = sx + (sub / subDiv) * tl.zoom
-                        Theme.setColor(Theme.C.border, 150)
-                        render.drawLine(subX, rulerY + 21, subX, rulerY + stripH - 2)
-                    end
+            if subDiv > 1 and sec < tl.duration then
+                for sub = 1, subDiv - 1 do
+                    local subX = sx + (sub / subDiv) * tl.zoom
+                    Theme.setColor(Theme.C.border, 140)
+                    render.drawLine(subX, rulerY + 21, subX, rulerY + stripH - 2)
                 end
             end
         end
@@ -3952,7 +4170,7 @@ do (function(SOLACE)
         end
 
         if trackAreaH >= 48 then
-            render.setFont(Theme.Fonts.Small)
+            Theme.setFont(Theme.Fonts.Small)
             Theme.setColor(Theme.C.textMuted)
             render.drawSimpleText(
                 rulerX + 12,
@@ -3975,13 +4193,9 @@ do (function(SOLACE)
                     Theme.setColor(Theme.C.bgSelectionRow)
                     render.drawRectFast(bx + 2, lRowY, headerColW - 4, rowH)
                 end
-                render.setFont(Theme.Fonts.Body)
+                Theme.setFont(Theme.Fonts.Body)
                 Theme.setColor(isSel and Theme.C.textPrimary or Theme.C.textSecondary)
                 render.drawSimpleText(bx + 10, lRowY + rowH * 0.5, item.node.name, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
-
-                render.setFont(Theme.Fonts.Small)
-                Theme.setColor(Theme.C.textMuted)
-                render.drawSimpleText(bx + headerColW - 8, lRowY + rowH * 0.5, "No tracks (P8)", TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
 
                 Theme.setColor(Theme.C.border, 90)
                 render.drawLine(bx, lRowY + rowH, bx + headerColW, lRowY + rowH)
@@ -4023,7 +4237,57 @@ do (function(SOLACE)
     local Toolbox = {
         _scrollY = 0,
         _contentH = 0,
+        _lastQuery = nil,
+        _filteredModels = nil,
+        _filteredSprites = nil,
+        _lastCustomPath = nil,
+        _lastCustomOk = false,
+        _lastCustomName = "Model",
     }
+
+    local function getFilteredModels(q)
+        if Toolbox._lastQuery == q and Toolbox._filteredModels then
+            return Toolbox._filteredModels
+        end
+        local list = {}
+        for idx, item in ipairs(Constants.STARTER_MODELS) do
+            local matches = (q == "")
+                or string.find(string.lower(item.name), q, 1, true) ~= nil
+                or string.find(string.lower(item.model), q, 1, true) ~= nil
+            if matches and Utils.checkModelMounted(item.model) then
+                list[#list + 1] = {
+                    id = "tbx_mdl_" .. idx,
+                    name = item.name,
+                    model = item.model,
+                    tip = "Spawn " .. item.model .. " in front of Freecam",
+                }
+            end
+        end
+        Toolbox._lastQuery = q
+        Toolbox._filteredModels = list
+        Toolbox._filteredSprites = nil
+        return list
+    end
+
+    local function getFilteredSprites(q)
+        if Toolbox._lastQuery == q and Toolbox._filteredSprites then
+            return Toolbox._filteredSprites
+        end
+        local list = {}
+        for idx, item in ipairs(Constants.STARTER_SPRITES) do
+            if q == "" or string.find(string.lower(item.name), q, 1, true) ~= nil then
+                list[#list + 1] = {
+                    id = "tbx_spr_" .. idx,
+                    name = item.name,
+                    material = item.material,
+                    tip = "Spawn 3D Sprite (" .. item.material .. ")",
+                }
+            end
+        end
+        Toolbox._lastQuery = q
+        Toolbox._filteredSprites = list
+        return list
+    end
 
     function Toolbox.draw(ui, state, rect, actions)
         if rect.w <= 0 or rect.h <= 0 then return end
@@ -4044,20 +4308,27 @@ do (function(SOLACE)
         local innerW = bw - pad * 2 - (maxScroll > 0 and 6 or 0)
         local curY = by + pad - Toolbox._scrollY
         local startY = curY
+        local visBottom = by + bh
 
         -- Search input
-        Widgets.textBox(
-            ui,
-            "toolbox_search",
-            bx + pad,
-            curY,
-            innerW,
-            24,
-            function() return state.toolboxSearch end,
-            function(v) state.toolboxSearch = v end,
-            "Filter assets...",
-            "Filter available models and sprites"
-        )
+        local searchGetter = function() return state.toolboxSearch end
+        local searchSetter = function(v) state.toolboxSearch = v end
+        if curY + 24 >= by and curY <= visBottom then
+            Widgets.textBox(
+                ui,
+                "toolbox_search",
+                bx + pad,
+                curY,
+                innerW,
+                24,
+                searchGetter,
+                searchSetter,
+                "Filter assets...",
+                "Filter available models and sprites"
+            )
+        else
+            ui:registerTextInput("toolbox_search", searchGetter, searchSetter)
+        end
         curY = curY + 30
 
         -- Category buttons (2 columns)
@@ -4075,13 +4346,15 @@ do (function(SOLACE)
             local isSelected = (state.activeToolboxCategory == cat.id)
             if isSelected then activeCatInfo = cat end
 
-            if Widgets.button(ui, "tbx_cat_" .. cat.id, cx, cy, cellW, cellH, cat.label, {
-                icon = cat.icon,
-                active = isSelected,
-                tooltip = cat.desc,
-            }) then
-                state.activeToolboxCategory = cat.id
-                Toolbox._scrollY = 0
+            if cy + cellH >= by and cy <= visBottom then
+                if Widgets.button(ui, "tbx_cat_" .. cat.id, cx, cy, cellW, cellH, cat.label, {
+                    icon = cat.icon,
+                    active = isSelected,
+                    tooltip = cat.desc,
+                }) then
+                    state.activeToolboxCategory = cat.id
+                    Toolbox._scrollY = 0
+                end
             end
         end
 
@@ -4089,128 +4362,156 @@ do (function(SOLACE)
         curY = curY + rows * (cellH + gap) + 8
 
         -- Hierarchy containers quick create
-        local halfW = math.floor((innerW - 4) * 0.5)
-        if Widgets.button(ui, "tbx_new_group", bx + pad, curY, halfW, 22, "+ Group", {
-            icon = "layers",
-            tooltip = "Create a Group node in the Scene Hierarchy",
-        }) then
-            actions.spawnGroup()
-        end
-        if Widgets.button(ui, "tbx_new_folder", bx + pad + halfW + 4, curY, innerW - halfW - 4, 22, "+ Folder", {
-            icon = "layers",
-            tooltip = "Create a Folder node in the Scene Hierarchy",
-        }) then
-            actions.spawnFolder()
+        if curY + 22 >= by and curY <= visBottom then
+            local halfW = math.floor((innerW - 4) * 0.5)
+            if Widgets.button(ui, "tbx_new_group", bx + pad, curY, halfW, 22, "+ Group", {
+                icon = "layers",
+                tooltip = "Create a Group node in the Scene Hierarchy",
+            }) then
+                actions.spawnGroup()
+            end
+            if Widgets.button(ui, "tbx_new_folder", bx + pad + halfW + 4, curY, innerW - halfW - 4, 22, "+ Folder", {
+                icon = "layers",
+                tooltip = "Create a Folder node in the Scene Hierarchy",
+            }) then
+                actions.spawnFolder()
+            end
         end
         curY = curY + 28
 
-        Theme.setColor(Theme.C.border)
-        render.drawLine(bx + pad, curY, bx + pad + innerW, curY)
+        if curY >= by and curY <= visBottom then
+            Theme.setColor(Theme.C.border)
+            render.drawLine(bx + pad, curY, bx + pad + innerW, curY)
+        end
         curY = curY + 8
 
         local q = string.lower(string.trim(state.toolboxSearch or ""))
 
         if state.activeToolboxCategory == "models" then
             -- Custom mounted .mdl path spawner
-            render.setFont(Theme.Fonts.Small)
-            Theme.setColor(Theme.C.textSecondary)
-            render.drawSimpleText(bx + pad, curY, "Custom Mounted Model (.mdl)", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            if curY + 15 >= by and curY <= visBottom then
+                Theme.setFont(Theme.Fonts.Small)
+                Theme.setColor(Theme.C.textSecondary)
+                render.drawSimpleText(bx + pad, curY, "Custom Mounted Model (.mdl)", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            end
             curY = curY + 15
 
-            Widgets.textBox(
-                ui,
-                "tbx_custom_mdl",
-                bx + pad,
-                curY,
-                innerW,
-                24,
-                function() return state.customModelPath end,
-                function(v) state.customModelPath = v end,
-                "models/...",
-                "Enter any mounted GMod model path (e.g. models/props_c17/oildrum001.mdl)"
-            )
+            local customGetter = function() return state.customModelPath end
+            local customSetter = function(v) state.customModelPath = v end
+            if curY + 24 >= by and curY <= visBottom then
+                Widgets.textBox(
+                    ui,
+                    "tbx_custom_mdl",
+                    bx + pad,
+                    curY,
+                    innerW,
+                    24,
+                    customGetter,
+                    customSetter,
+                    "models/...",
+                    "Enter any mounted GMod model path (e.g. models/props_c17/oildrum001.mdl)"
+                )
+            else
+                ui:registerTextInput("tbx_custom_mdl", customGetter, customSetter)
+            end
             curY = curY + 28
 
-            local customOk = Utils.checkModelMounted(state.customModelPath)
-            local spawnLabel = customOk and "Spawn Custom Model" or "Model Path Not Found"
-            if Widgets.button(ui, "tbx_spawn_custom", bx + pad, curY, innerW, 24, spawnLabel, {
-                icon = "cube",
-                disabled = not customOk,
-                tooltip = customOk and ("Spawn " .. state.customModelPath .. " in front of camera") or "Verify path starts with models/ and exists in GMod",
-            }) then
-                local fname = string.getFileFromFilename(state.customModelPath) or "Model"
+            local cpath = state.customModelPath or ""
+            if cpath ~= Toolbox._lastCustomPath then
+                Toolbox._lastCustomPath = cpath
+                Toolbox._lastCustomOk = Utils.checkModelMounted(cpath)
+                local fname = string.getFileFromFilename(cpath) or "Model"
                 local cleanName = string.stripExtension(fname)
-                actions.spawnQuickModel(cleanName ~= "" and cleanName or "Model", state.customModelPath)
+                Toolbox._lastCustomName = (cleanName ~= "" and cleanName or "Model")
+            end
+
+            if curY + 24 >= by and curY <= visBottom then
+                local customOk = Toolbox._lastCustomOk
+                local spawnLabel = customOk and "Spawn Custom Model" or "Model Path Not Found"
+                if Widgets.button(ui, "tbx_spawn_custom", bx + pad, curY, innerW, 24, spawnLabel, {
+                    icon = "cube",
+                    disabled = not customOk,
+                    tooltip = customOk and ("Spawn " .. cpath .. " in front of camera") or "Verify path starts with models/ and exists in GMod",
+                }) then
+                    actions.spawnQuickModel(Toolbox._lastCustomName, cpath)
+                end
             end
             curY = curY + 32
 
-            render.setFont(Theme.Fonts.Small)
-            Theme.setColor(Theme.C.textSecondary)
-            render.drawSimpleText(bx + pad, curY, "Starter Models (Click to Spawn)", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            if curY + 15 >= by and curY <= visBottom then
+                Theme.setFont(Theme.Fonts.Small)
+                Theme.setColor(Theme.C.textSecondary)
+                render.drawSimpleText(bx + pad, curY, "Starter Models (Click to Spawn)", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            end
             curY = curY + 16
 
-            local shown = 0
-            for idx, item in ipairs(Constants.STARTER_MODELS) do
-                local matches = (q == "")
-                    or string.find(string.lower(item.name), q, 1, true) ~= nil
-                    or string.find(string.lower(item.model), q, 1, true) ~= nil
-                if matches then
-                    local mounted = Utils.checkModelMounted(item.model)
-                    if mounted then
-                        shown = shown + 1
-                        if Widgets.button(ui, "tbx_mdl_" .. idx, bx + pad, curY, innerW, 24, item.name, {
+            local list = getFilteredModels(q)
+            if #list > 0 then
+                for _, entry in ipairs(list) do
+                    if curY + 24 >= by and curY <= visBottom then
+                        if Widgets.button(ui, entry.id, bx + pad, curY, innerW, 24, entry.name, {
                             icon = "cube",
                             subtle = true,
-                            tooltip = "Spawn " .. item.model .. " in front of Freecam",
+                            tooltip = entry.tip,
                         }) then
-                            actions.spawnQuickModel(item.name, item.model)
+                            actions.spawnQuickModel(entry.name, entry.model)
                         end
-                        curY = curY + 26
                     end
+                    curY = curY + 26
                 end
-            end
-            if shown == 0 then
-                render.setFont(Theme.Fonts.Small)
-                Theme.setColor(Theme.C.textMuted)
-                render.drawSimpleText(bx + pad, curY, "No starter models match filter.", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            else
+                if curY + 16 >= by and curY <= visBottom then
+                    Theme.setFont(Theme.Fonts.Small)
+                    Theme.setColor(Theme.C.textMuted)
+                    render.drawSimpleText(bx + pad, curY, "No starter models match filter.", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+                end
                 curY = curY + 20
             end
 
             curY = curY + 6
-            local nh = Widgets.phaseNotice(
-                bx + pad, curY, innerW,
-                "Full Asset Scanner",
-                { "Auto-indexing all GMod/addon", "models arrives in Phase 6." },
-                "Phase 6"
-            )
+            local nh = 64
+            if curY + nh >= by and curY <= visBottom then
+                nh = Widgets.phaseNotice(
+                    bx + pad, curY, innerW,
+                    "Full Asset Scanner",
+                    { "Auto-indexing all GMod/addon", "models arrives in Phase 6." },
+                    "Phase 6"
+                )
+            end
             curY = curY + nh + 8
 
         elseif state.activeToolboxCategory == "sprites" then
-            render.setFont(Theme.Fonts.Small)
-            Theme.setColor(Theme.C.textSecondary)
-            render.drawSimpleText(bx + pad, curY, "Starter Sprites (Click to Spawn)", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            if curY + 15 >= by and curY <= visBottom then
+                Theme.setFont(Theme.Fonts.Small)
+                Theme.setColor(Theme.C.textSecondary)
+                render.drawSimpleText(bx + pad, curY, "Starter Sprites (Click to Spawn)", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            end
             curY = curY + 16
 
-            for idx, item in ipairs(Constants.STARTER_SPRITES) do
-                if q == "" or string.find(string.lower(item.name), q, 1, true) ~= nil then
-                    if Widgets.button(ui, "tbx_spr_" .. idx, bx + pad, curY, innerW, 24, item.name, {
+            local list = getFilteredSprites(q)
+            for _, entry in ipairs(list) do
+                if curY + 24 >= by and curY <= visBottom then
+                    if Widgets.button(ui, entry.id, bx + pad, curY, innerW, 24, entry.name, {
                         icon = "sparkle",
                         subtle = true,
-                        tooltip = "Spawn 3D Sprite (" .. item.material .. ")",
+                        tooltip = entry.tip,
                     }) then
-                        actions.spawnSprite(item.name, item.material)
+                        actions.spawnSprite(entry.name, entry.material)
                     end
-                    curY = curY + 26
                 end
+                curY = curY + 26
             end
 
             curY = curY + 6
-            local nh = Widgets.phaseNotice(
-                bx + pad, curY, innerW,
-                "Dedicated Sprite Editor",
-                { "Size/fade/lifetime curves & material", "browser arrive in Phase 7." },
-                "Phase 7"
-            )
+            local nh = 64
+            if curY + nh >= by and curY <= visBottom then
+                nh = Widgets.phaseNotice(
+                    bx + pad, curY, innerW,
+                    "Dedicated Sprite Editor",
+                    { "Size/fade/lifetime curves & material", "browser arrive in Phase 7." },
+                    "Phase 7"
+                )
+            end
             curY = curY + nh + 8
         else
             local nh = Widgets.phaseNotice(
@@ -4623,6 +4924,104 @@ do (function(SOLACE)
         runtime:drawSprites(state)
     end)
 
+    local rtSupported = (type(render.createRenderTarget) == "function")
+        and (type(render.selectRenderTarget) == "function")
+        and (type(render.setRenderTargetTexture) == "function")
+        and (type(render.drawTexturedRectUVFast) == "function")
+
+    local panelCaches = {
+        toolbar    = { rtName = "sol_rt_tb",   w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
+        toolbox    = { rtName = "sol_rt_tbx",  w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
+        explorer   = { rtName = "sol_rt_exp",  w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
+        properties = { rtName = "sol_rt_prop", w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
+        timeline   = { rtName = "sol_rt_tl",   w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
+    }
+
+    local function drawCachedPanel(key, rect, sig, isActiveInPanel, drawFn)
+        local w, h = rect.w, rect.h
+        if w <= 0 or h <= 0 then return end
+
+        local c = panelCaches[key]
+        if not rtSupported or c.failed or w > 2048 or h > 1024 or (w > 1024 and h > 510) then
+            drawFn(rect)
+            return
+        end
+
+        if not c.created then
+            local ok = pcall(render.createRenderTarget, c.rtName)
+            if not ok then
+                c.failed = true
+                drawFn(rect)
+                return
+            end
+            c.created = true
+        end
+
+        local inPanel = ui:pointInRect(rect.x, rect.y, w, h)
+        local dirty = (w ~= c.w) or (h ~= c.h) or (sig ~= c.sig)
+            or inPanel or c.wasInPanel
+            or isActiveInPanel or c.wasActive
+            or (ui.wheelDelta ~= 0 and inPanel)
+
+        if dirty then
+            local realMx, realMy = ui.mx, ui.my
+            render.selectRenderTarget(c.rtName)
+            Theme.beginFrame()
+            if w <= 1024 then
+                ui.mx = realMx - rect.x
+                ui.my = realMy - rect.y
+                c.localRect.x = 0
+                c.localRect.y = 0
+                c.localRect.w = w
+                c.localRect.h = h
+                drawFn(c.localRect)
+            else
+                ui.mx = realMx - rect.x
+                ui.my = realMy - rect.y
+                c.localRect.x = 0
+                c.localRect.y = 0
+                c.localRect.w = w
+                c.localRect.h = h
+                ui:pushClip(0, 0, 1024, h)
+                drawFn(c.localRect)
+                ui:popClip()
+
+                local offY = h + 2
+                ui.mx = realMx - rect.x - 1024
+                ui.my = realMy - rect.y - offY
+                c.localRect.x = -1024
+                c.localRect.y = offY
+                c.localRect.w = w
+                c.localRect.h = h
+                ui:pushClip(0, offY, w - 1024, h)
+                drawFn(c.localRect)
+                ui:popClip()
+            end
+            ui.mx = realMx
+            ui.my = realMy
+            render.selectRenderTarget(nil)
+            Theme.beginFrame()
+
+            c.w = w
+            c.h = h
+            c.sig = sig
+            c.wasInPanel = inPanel
+            c.wasActive = isActiveInPanel
+        end
+
+        render.setRenderTargetTexture(c.rtName)
+        Theme.setRGBA(255, 255, 255, 255)
+        if w <= 1024 then
+            render.drawTexturedRectUVFast(rect.x, rect.y, w, h, 0, 0, w / 1024, h / 1024)
+        else
+            local remW = w - 1024
+            local offY = h + 2
+            render.drawTexturedRectUVFast(rect.x, rect.y, 1024, h, 0, 0, 1, h / 1024)
+            render.drawTexturedRectUVFast(rect.x + 1024, rect.y, remW, h, 0, offY / 1024, remW / 1024, (offY + h) / 1024)
+        end
+        render.setRenderTargetTexture(nil)
+    end
+
     hook.add("DrawHUD", "solace_hud_paint", function()
         if not hasPermission("render.hud") then return end
         hudConnected = true
@@ -4639,10 +5038,12 @@ do (function(SOLACE)
             printConsole(string.format("[SOLACE CL] DrawHUD active (%dx%d, studioOpen=%s)", sw or 0, sh or 0, tostring(state.studioOpen)))
         end
 
+        Theme.beginFrame()
+
         if not state.studioOpen then
             local scrW = render.getResolution()
             local label = "SOLACE Minimized  |  Press F6 to Open"
-            render.setFont(Theme.Fonts.Small)
+            Theme.setFont(Theme.Fonts.Small)
             local tw = render.getTextSize(label)
             local pw = tw + 18
             local px = scrW - pw - 14
@@ -4666,14 +5067,63 @@ do (function(SOLACE)
             camera:update(dt, ui, rects.viewport)
 
             local sel = sceneGraph:getSelectedNode()
+            local selIds = sceneGraph:getSelectedIds()
             actions.hasSelection = (sel ~= nil and sel.id ~= sceneGraph:getRootId())
 
-            -- Draw docked studio panels around the live center 3D viewport cutout
-            Toolbar.draw(ui, state, layout, rects.toolbar, actions)
-            Toolbox.draw(ui, state, rects.toolbox, actions)
-            Explorer.draw(ui, state, sceneGraph, rects.explorer, actions)
-            Properties.draw(ui, state, sceneGraph, runtime, camera, rects.properties, actions)
-            Timeline.draw(ui, state, sceneGraph, rects.timeline)
+            local actId = ui.activeId
+            local focId = ui.focusedInputId
+            local blinkPhase = math.floor(ui._frameTime * 2)
+            local actPrefix3 = actId and string.sub(actId, 1, 3) or ""
+            local actPrefix4 = actId and string.sub(actId, 1, 4) or ""
+
+            -- Draw docked studio panels around the live center 3D viewport cutout (1:1 RT cached when idle)
+            local tbSig = state.activeTool .. ":" .. tostring(actions.hasSelection)
+                .. ":" .. tostring(state.grid.enabled) .. tostring(state.grid.showAxes) .. tostring(state.grid.showTelemetry)
+                .. ":" .. tostring(state.panels.toolbox) .. tostring(state.panels.explorer) .. tostring(state.panels.properties) .. tostring(state.panels.timeline)
+            drawCachedPanel("toolbar", rects.toolbar, tbSig, actPrefix3 == "tb_", function(r)
+                Toolbar.draw(ui, state, layout, r, actions)
+            end)
+
+            local tbxFocus = (focId == "toolbox_search" or focId == "tbx_custom_mdl")
+            local tbxSig = state.activeToolboxCategory .. "|" .. state.toolboxSearch .. "|" .. state.customModelPath
+                .. "|" .. tostring(Toolbox._scrollY) .. "|" .. (tbxFocus and (focId .. ":" .. blinkPhase) or "")
+            drawCachedPanel("toolbox", rects.toolbox, tbxSig, actPrefix4 == "tbx_" or actPrefix4 == "tool", function(r)
+                Toolbox.draw(ui, state, r, actions)
+            end)
+
+            local expFocus = (focId == "explorer_search")
+            local expSig = sceneGraph._version .. "|" .. tostring(sel and sel.id) .. "|" .. #selIds
+                .. "|" .. state.explorerSearch .. "|" .. tostring(Explorer._scrollY) .. "|" .. (expFocus and blinkPhase or "")
+            drawCachedPanel("explorer", rects.explorer, expSig, actPrefix4 == "exp_" or actPrefix4 == "expl", function(r)
+                Explorer.draw(ui, state, sceneGraph, r, actions)
+            end)
+
+            local propFocus = (focId ~= nil and string.sub(focId, 1, 15) == "prop_node_name_")
+            local selXform = sel and (sel.transform.pos[1] .. "," .. sel.transform.pos[2] .. "," .. sel.transform.pos[3]
+                .. "," .. sel.transform.ang[1] .. "," .. sel.transform.ang[2] .. "," .. sel.transform.ang[3]
+                .. "," .. sel.transform.scale[1] .. "," .. sel.transform.scale[2] .. "," .. sel.transform.scale[3]) or ""
+            local c = state.camera
+            local g = state.grid
+            local s = state.sections
+            local propSig = sceneGraph._version .. "|" .. tostring(sel and sel.id) .. "|" .. tostring(sel and sel.name)
+                .. "|" .. tostring(sel and sel.visible) .. "|" .. #selIds .. "|" .. selXform
+                .. "|" .. c.speed .. ":" .. c.boostMult .. ":" .. c.sensitivity .. ":" .. c.fov .. ":" .. c.smoothing
+                .. "|" .. tostring(g.enabled) .. ":" .. g.spacing .. ":" .. g.halfExtents .. ":" .. g.originMode
+                .. ":" .. tostring(g.showOrientationGizmo) .. ":" .. tostring(g.showTelemetry)
+                .. "|" .. tostring(s.selection) .. tostring(s.camera) .. tostring(s.grid) .. tostring(s.origin) .. tostring(s.quotas)
+                .. "|" .. (s.quotas and math.floor(ui._frameTime * 5) or 0)
+                .. "|" .. (propFocus and blinkPhase or "")
+                .. "|" .. tostring(Properties._scrollY)
+            drawCachedPanel("properties", rects.properties, propSig, actPrefix4 == "prop" or actPrefix4 == "sec_", function(r)
+                Properties.draw(ui, state, sceneGraph, runtime, camera, r, actions)
+            end)
+
+            local tl = state.timeline
+            local tlSig = sceneGraph._version .. "|" .. tostring(sel and sel.id)
+                .. "|" .. tl.currentTime .. "|" .. tl.duration .. "|" .. tl.fps .. "|" .. tl.zoom .. "|" .. tl.scrollTime
+            drawCachedPanel("timeline", rects.timeline, tlSig, actPrefix3 == "tl_", function(r)
+                Timeline.draw(ui, state, sceneGraph, r)
+            end)
 
             -- Draw viewport frame, 3D orientation triad & telemetry
             ViewportGrid.drawOverlay(state, ui, rects.viewport, fpsSmooth, camera, sceneGraph)
@@ -4691,6 +5141,12 @@ do (function(SOLACE)
         end)
 
         if not ok then
+            if render.isInRenderTarget and render.isInRenderTarget() then
+                pcall(render.selectRenderTarget, nil)
+            end
+            if render.setRenderTargetTexture then
+                pcall(render.setRenderTargetTexture, nil)
+            end
             while #ui._clipStack > 0 do
                 ui:popClip()
             end
