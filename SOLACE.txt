@@ -1500,6 +1500,7 @@ do (function(SOLACE)
             camAng = Angle(15, 0, 0),
             targetPos = Vector(0, 0, 100),
             targetAng = Angle(15, 0, 0),
+            _viewOut = { origin = nil, angles = nil, fov = 80, drawviewer = true },
         }, Freecam)
     end
 
@@ -1623,12 +1624,11 @@ do (function(SOLACE)
         if not self.initialized then
             self:initFromPlayer()
         end
-        return {
-            origin = self.camPos,
-            angles = self.camAng,
-            fov = self.state.camera.fov,
-            drawviewer = true,
-        }
+        local v = self._viewOut
+        v.origin = self.camPos
+        v.angles = self.camAng
+        v.fov = self.state.camera.fov
+        return v
     end
 
 
@@ -1702,15 +1702,27 @@ do (function(SOLACE)
         end
     end
 
+    local _lastPickKey = nil
+
     function Selection.pickAtCursor(ui, state, camera, sceneGraph, runtime, vpRect)
         if not state.studioOpen or state.viewportLooking then
             Selection.hoveredId = nil
+            _lastPickKey = nil
             return nil
         end
         if not ui:pointInRect(vpRect.x, vpRect.y, vpRect.w, vpRect.h) then
             Selection.hoveredId = nil
+            _lastPickKey = nil
             return nil
         end
+
+        local cp, ca = camera.camPos, camera.camAng
+        local key = ui.mx .. ":" .. ui.my .. ":" .. cp[1] .. ":" .. cp[2] .. ":" .. cp[3]
+            .. ":" .. ca[1] .. ":" .. ca[2] .. ":" .. state.camera.fov .. ":" .. (sceneGraph._version or 0)
+        if not ui.leftPressed and key == _lastPickKey then
+            return Selection.hoveredId
+        end
+        _lastPickKey = key
 
         local aimDir = trace.aimVector(camera.camAng, state.camera.fov, ui.mx, ui.my, ui.scrW, ui.scrH)
         local rayDelta = aimDir * RAY_LEN
@@ -2134,12 +2146,18 @@ do (function(SOLACE)
             rightDown = false,
             rightPressed = false,
             rightReleased = false,
+            middleDown = false,
+            middlePressed = false,
+            middleReleased = false,
             wheelDelta = 0,
             _sliderFmt = {},
+            _scrollGrabOffset = 0,
 
             activeId = nil,       -- ID currently captured by mouse drag
             hotId = nil,          -- ID currently hovered
             focusedInputId = nil, -- ID of active TextBox
+            autoScroll = nil,     -- Active browser-style MMB autoscroll session
+            _autoScrollConsumed = false,
             _inputState = {},     -- Per-TextBox transient cursor/value callbacks
             _tooltipText = nil,
             _tooltipTimer = 0,
@@ -2162,8 +2180,10 @@ do (function(SOLACE)
         self.dx = self.mx - self.prevMx
         self.dy = self.my - self.prevMy
 
-        local lDown = hasPermission("input") and input.isMouseDown(MOUSE.LEFT) or false
-        local rDown = hasPermission("input") and input.isMouseDown(MOUSE.RIGHT) or false
+        local hasInp = hasPermission("input")
+        local lDown = hasInp and input.isMouseDown(MOUSE.LEFT) or false
+        local rDown = hasInp and input.isMouseDown(MOUSE.RIGHT) or false
+        local mDown = (hasInp and MOUSE.MIDDLE) and input.isMouseDown(MOUSE.MIDDLE) or false
 
         self.leftPressed = lDown and not self.leftDown
         self.leftReleased = (not lDown) and self.leftDown
@@ -2173,6 +2193,23 @@ do (function(SOLACE)
         self.rightReleased = (not rDown) and self.rightDown
         self.rightDown = rDown
 
+        self.middlePressed = mDown and not self.middleDown
+        self.middleReleased = (not mDown) and self.middleDown
+        self.middleDown = mDown
+
+        self._autoScrollConsumed = false
+        if self.autoScroll then
+            local a = self.autoScroll
+            if mDown and (math.abs(self.mx - a.originX) > 8 or math.abs(self.my - a.originY) > 8) then
+                a.dragged = true
+            end
+            if self.middlePressed or self.leftPressed or self.rightPressed or (self.middleReleased and a.dragged) then
+                self.autoScroll = nil
+                self._autoScrollConsumed = true
+                self._tooltipText = nil
+            end
+        end
+
         if self.leftPressed then
             -- Clear text focus unless the clicked TextBox re-claims it during draw/update
             self._pendingClearFocus = true
@@ -2180,6 +2217,25 @@ do (function(SOLACE)
 
         self.hotId = nil
         self._tooltipText = nil
+    end
+
+    function UIManager:beginAutoScroll(id, canH, canV)
+        if self.autoScroll or self._autoScrollConsumed then return false end
+        self.autoScroll = {
+            id = id,
+            originX = self.mx,
+            originY = self.my,
+            dragged = false,
+            canH = canH == true,
+            canV = canV == true,
+        }
+        self.hotId = nil
+        self._tooltipText = nil
+        return true
+    end
+
+    function UIManager:cancelAutoScroll()
+        self.autoScroll = nil
     end
 
     function UIManager:endFrame(dt)
@@ -2218,7 +2274,9 @@ do (function(SOLACE)
     end
 
     function UIManager:hitTest(id, x, y, w, h)
-        if self.state.viewportLooking then return false, false end
+        if self.state.viewportLooking or self.autoScroll or self._autoScrollConsumed then
+            return false, false
+        end
         local inside = self:pointInRect(x, y, w, h) and self:isMouseInClip()
         local canHover = (self.activeId == nil or self.activeId == id)
         if inside and canHover then
@@ -2344,6 +2402,38 @@ do (function(SOLACE)
         render.drawRectOutline(tx, ty, bw, bh, 1)
         Theme.setColor(Theme.C.textPrimary)
         render.drawSimpleText(tx + padX, ty + padY, self._tooltipText, TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+    end
+
+    function UIManager:drawAutoScrollIcon()
+        local a = self.autoScroll
+        if not a then return end
+
+        local cx, cy = math.floor(a.originX), math.floor(a.originY)
+        local r = 13
+        Theme.setColor(Theme.C.hudPill, 245)
+        render.drawRectFast(cx - r, cy - r, r * 2, r * 2)
+        Theme.setColor(Theme.C.accentBright)
+        render.drawRectOutline(cx - r, cy - r, r * 2, r * 2, 1)
+
+        -- Center dot
+        render.drawRectFast(cx - 2, cy - 2, 4, 4)
+
+        -- Up / Down arrows
+        if a.canV then
+            Theme.setColor(Theme.C.textPrimary)
+            render.drawLine(cx, cy - 9, cx - 4, cy - 5)
+            render.drawLine(cx, cy - 9, cx + 4, cy - 5)
+            render.drawLine(cx, cy + 9, cx - 4, cy + 5)
+            render.drawLine(cx, cy + 9, cx + 4, cy + 5)
+        end
+        -- Left / Right arrows
+        if a.canH then
+            Theme.setColor(Theme.C.textPrimary)
+            render.drawLine(cx - 9, cy, cx - 5, cy - 4)
+            render.drawLine(cx - 9, cy, cx - 5, cy + 4)
+            render.drawLine(cx + 9, cy, cx + 5, cy - 4)
+            render.drawLine(cx + 9, cy, cx + 5, cy + 4)
+        end
     end
 
     SOLACE.UIManager = UIManager
@@ -2661,6 +2751,48 @@ do (function(SOLACE)
             render.drawSimpleText(x + 10, y + 26 + (i - 1) * lineH, line, TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
         end
         return h
+    end
+
+    function Widgets.scrollbar(ui, id, trackX, trackY, barW, trackH, scrollY, contentH, viewH)
+        local maxScroll = math.max(0, contentH - viewH)
+        if maxScroll <= 0 or trackH < 24 then return 0, false end
+
+        local thumbH = math.max(22, math.floor(trackH * (viewH / contentH)))
+        local travel = math.max(1, trackH - thumbH)
+        local curScroll = math.clamp(scrollY, 0, maxScroll)
+        local thumbY = trackY + math.floor(travel * (curScroll / maxScroll))
+
+        -- Generous hitbox so hovering & grabbing the scrollbar is effortless
+        local hot, captured = ui:hitTest(id, trackX - 4, trackY, barW + 6, trackH)
+        if hot then
+            ui:setTooltip("Drag scrollbar (or middle-click panel to autoscroll)")
+        end
+
+        if hot and ui.leftPressed then
+            ui:capture(id)
+            if ui.my >= thumbY and ui.my <= thumbY + thumbH then
+                ui._scrollGrabOffset = ui.my - thumbY
+            else
+                ui._scrollGrabOffset = thumbH * 0.5
+                local frac = math.clamp((ui.my - ui._scrollGrabOffset - trackY) / travel, 0, 1)
+                curScroll = frac * maxScroll
+                thumbY = trackY + math.floor(travel * (curScroll / maxScroll))
+            end
+        end
+
+        if captured and ui.leftDown then
+            local newThumbY = ui.my - (ui._scrollGrabOffset or (thumbH * 0.5))
+            local frac = math.clamp((newThumbY - trackY) / travel, 0, 1)
+            curScroll = frac * maxScroll
+            thumbY = trackY + math.floor(travel * (curScroll / maxScroll))
+        end
+
+        Theme.setColor(Theme.C.bgInput)
+        render.drawRectFast(trackX, trackY, barW, trackH)
+        Theme.setColor(captured and Theme.C.accentBright or (hot and Theme.C.accent or Theme.C.borderLight))
+        render.drawRectFast(trackX, thumbY, barW, thumbH)
+
+        return curScroll, (captured and ui.leftDown)
     end
 
     SOLACE.Widgets = Widgets
@@ -3381,6 +3513,7 @@ do (function(SOLACE)
     local Explorer = {
         _scrollY = 0,
         _contentH = 0,
+        _viewH = 0,
         _lastCount = -1,
         _countStr = "0 nodes",
     }
@@ -3412,6 +3545,7 @@ do (function(SOLACE)
         local topBarH = 56
         local listY = by + topBarH
         local listH = math.max(0, bh - topBarH)
+        Explorer._viewH = listH
 
         -- Scroll tree area with mouse wheel
         if ui.wheelDelta ~= 0 and ui:pointInRect(bx, listY, bw, listH) then
@@ -3487,18 +3621,19 @@ do (function(SOLACE)
                 local isPrimary = (node.id == primaryId)
                 local rowId = "exp_row_" .. node.id
                 local eyeSize = 18
-                local eyeX = bx + bw - eyeSize - (maxScroll > 0 and 10 or 6)
+                local rowW = bw - (maxScroll > 0 and 14 or 4)
+                local eyeX = bx + bw - eyeSize - (maxScroll > 0 and 14 or 6)
 
-                local hot, _ = ui:hitTest(rowId, bx + 2, curY, bw - 4, rowH)
+                local hot, _ = ui:hitTest(rowId, bx + 2, curY, rowW, rowH)
 
                 if isSel then
                     Theme.setColor(Theme.C.bgSelectionRow, isPrimary and 120 or 75)
-                    render.drawRectFast(bx + 2, curY, bw - 4, rowH)
+                    render.drawRectFast(bx + 2, curY, rowW, rowH)
                     Theme.setColor(isPrimary and Theme.C.accentBright or Theme.C.accent)
                     render.drawRectFast(bx + 2, curY, 2, rowH)
                 elseif hot then
                     Theme.setColor(Theme.C.bgControlHover, 140)
-                    render.drawRectFast(bx + 2, curY, bw - 4, rowH)
+                    render.drawRectFast(bx + 2, curY, rowW, rowH)
                 end
 
                 -- Expand / collapse chevron
@@ -3575,17 +3710,14 @@ do (function(SOLACE)
         end
 
         Explorer._contentH = (curY - startY) + 8
+        maxScroll = math.max(0, Explorer._contentH - listH)
 
         if maxScroll > 0 then
-            local barW = 4
-            local barX = bx + bw - barW - 2
-            local trackH = listH - 4
-            local thumbH = math.max(20, math.floor(trackH * (listH / Explorer._contentH)))
-            local thumbY = listY + 2 + math.floor((trackH - thumbH) * (Explorer._scrollY / maxScroll))
-            Theme.setColor(Theme.C.bgInput)
-            render.drawRectFast(barX, listY + 2, barW, trackH)
-            Theme.setColor(Theme.C.borderLight)
-            render.drawRectFast(barX, thumbY, barW, thumbH)
+            Explorer._scrollY = Widgets.scrollbar(
+                ui, "exp_sb",
+                bx + bw - 8, listY + 2, 6, listH - 4,
+                Explorer._scrollY, Explorer._contentH, listH
+            )
         end
 
         ui:popClip()
@@ -3600,6 +3732,7 @@ do (function(SOLACE)
     local Properties = {
         _scrollY = 0,
         _contentH = 0,
+        _viewH = 0,
         _selCountLast = -1,
         _selCountLabel = "0 selected",
         _xformCache = {},
@@ -3639,6 +3772,7 @@ do (function(SOLACE)
         end
         local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Properties", rightLabel)
         if bw < 20 or bh < 40 then return end
+        Properties._viewH = bh
 
         if ui.wheelDelta ~= 0 and ui:pointInRect(bx, by, bw, bh) then
             Properties._scrollY = Properties._scrollY - ui.wheelDelta * 28
@@ -3650,14 +3784,15 @@ do (function(SOLACE)
 
         local pad = Theme.Metrics.pad
         local rowH = Theme.Metrics.controlH
-        local innerW = bw - pad * 2 - (maxScroll > 0 and 8 or 0)
+        local headerW = bw - (maxScroll > 0 and 12 or 0)
+        local innerW = bw - pad * 2 - (maxScroll > 0 and 12 or 0)
         local curY = by + pad - Properties._scrollY
         local startY = curY
         local visBottom = by + bh
 
         -- 1. Selected Object
         if curY + 22 >= by and curY <= visBottom then
-            state.sections.selection = Widgets.sectionHeader(ui, "sec_selection", bx, curY, bw, 22, "Selection", state.sections.selection)
+            state.sections.selection = Widgets.sectionHeader(ui, "sec_selection", bx, curY, headerW, 22, "Selection", state.sections.selection)
         end
         curY = curY + 26
         if state.sections.selection then
@@ -3777,7 +3912,7 @@ do (function(SOLACE)
 
         -- 2. Freecam Camera (live)
         if curY + 22 >= by and curY <= visBottom then
-            state.sections.camera = Widgets.sectionHeader(ui, "sec_camera", bx, curY, bw, 22, "Freecam Camera", state.sections.camera)
+            state.sections.camera = Widgets.sectionHeader(ui, "sec_camera", bx, curY, headerW, 22, "Freecam Camera", state.sections.camera)
         end
         curY = curY + 26
         if state.sections.camera then
@@ -3845,7 +3980,7 @@ do (function(SOLACE)
 
         -- 3. Viewport Grid (live)
         if curY + 22 >= by and curY <= visBottom then
-            state.sections.grid = Widgets.sectionHeader(ui, "sec_grid", bx, curY, bw, 22, "Viewport Grid", state.sections.grid)
+            state.sections.grid = Widgets.sectionHeader(ui, "sec_grid", bx, curY, headerW, 22, "Viewport Grid", state.sections.grid)
         end
         curY = curY + 26
         if state.sections.grid then
@@ -3885,7 +4020,7 @@ do (function(SOLACE)
 
         -- 4. Studio Origin & HUD
         if curY + 22 >= by and curY <= visBottom then
-            state.sections.origin = Widgets.sectionHeader(ui, "sec_origin", bx, curY, bw, 22, "Studio Origin & HUD", state.sections.origin)
+            state.sections.origin = Widgets.sectionHeader(ui, "sec_origin", bx, curY, headerW, 22, "Studio Origin & HUD", state.sections.origin)
         end
         curY = curY + 26
         if state.sections.origin then
@@ -3927,7 +4062,7 @@ do (function(SOLACE)
 
         -- 5. StarfallEx Quotas & Permissions
         if curY + 22 >= by and curY <= visBottom then
-            state.sections.quotas = Widgets.sectionHeader(ui, "sec_quotas", bx, curY, bw, 22, "StarfallEx Runtime", state.sections.quotas)
+            state.sections.quotas = Widgets.sectionHeader(ui, "sec_quotas", bx, curY, headerW, 22, "StarfallEx Runtime", state.sections.quotas)
         end
         curY = curY + 26
         if state.sections.quotas then
@@ -3975,17 +4110,14 @@ do (function(SOLACE)
         end
 
         Properties._contentH = (curY - startY) + pad
+        maxScroll = math.max(0, Properties._contentH - bh)
 
         if maxScroll > 0 then
-            local barW = 4
-            local barX = bx + bw - barW - 2
-            local trackH = bh - 4
-            local thumbH = math.max(24, math.floor(trackH * (bh / Properties._contentH)))
-            local thumbY = by + 2 + math.floor((trackH - thumbH) * (Properties._scrollY / maxScroll))
-            Theme.setColor(Theme.C.bgInput)
-            render.drawRectFast(barX, by + 2, barW, trackH)
-            Theme.setColor(Theme.C.borderLight)
-            render.drawRectFast(barX, thumbY, barW, thumbH)
+            Properties._scrollY = Widgets.scrollbar(
+                ui, "prop_sb",
+                bx + bw - 8, by + 2, 6, bh - 4,
+                Properties._scrollY, Properties._contentH, bh
+            )
         end
 
         ui:popClip()
@@ -4283,6 +4415,7 @@ do (function(SOLACE)
     local Toolbox = {
         _scrollY = 0,
         _contentH = 0,
+        _viewH = 0,
         _lastQuery = nil,
         _filteredModels = nil,
         _filteredSprites = nil,
@@ -4340,6 +4473,7 @@ do (function(SOLACE)
 
         local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Toolbox", "Create")
         if bw < 20 or bh < 40 then return end
+        Toolbox._viewH = bh
 
         -- Scroll body with wheel when mouse inside Toolbox
         if ui.wheelDelta ~= 0 and ui:pointInRect(bx, by, bw, bh) then
@@ -4351,7 +4485,7 @@ do (function(SOLACE)
         ui:pushClip(bx, by, bw, bh)
 
         local pad = Theme.Metrics.pad
-        local innerW = bw - pad * 2 - (maxScroll > 0 and 6 or 0)
+        local innerW = bw - pad * 2 - (maxScroll > 0 and 10 or 0)
         local curY = by + pad - Toolbox._scrollY
         local startY = curY
         local visBottom = by + bh
@@ -4577,17 +4711,14 @@ do (function(SOLACE)
         end
 
         Toolbox._contentH = (curY - startY) + pad
+        maxScroll = math.max(0, Toolbox._contentH - bh)
 
         if maxScroll > 0 then
-            local barW = 4
-            local barX = bx + bw - barW - 2
-            local trackH = bh - 4
-            local thumbH = math.max(24, math.floor(trackH * (bh / Toolbox._contentH)))
-            local thumbY = by + 2 + math.floor((trackH - thumbH) * (Toolbox._scrollY / maxScroll))
-            Theme.setColor(Theme.C.bgInput)
-            render.drawRectFast(barX, by + 2, barW, trackH)
-            Theme.setColor(Theme.C.borderLight)
-            render.drawRectFast(barX, thumbY, barW, thumbH)
+            Toolbox._scrollY = Widgets.scrollbar(
+                ui, "tbx_sb",
+                bx + bw - 8, by + 2, 6, bh - 4,
+                Toolbox._scrollY, Toolbox._contentH, bh
+            )
         end
 
         ui:popClip()
@@ -4705,7 +4836,30 @@ do (function(SOLACE)
         )
     end
 
+    local lowCpuUntil = 0
+
+    local function isOverlayOrUnfocused()
+        if game.hasFocus and not game.hasFocus() then return true end
+        if game.isPauseMenuVisible and game.isPauseMenuVisible() then return true end
+        return false
+    end
+
+    local function getCpuRatio()
+        local avgFn = cpuAverage or quotaAverage
+        local maxFn = cpuMax or quotaMax
+        if not avgFn or not maxFn then return 0 end
+        local cap = maxFn()
+        if cap <= 0 then return 0 end
+        local ratio = avgFn() / cap
+        if cpuUsed then
+            local usedRatio = cpuUsed() / cap
+            if usedRatio > ratio then ratio = usedRatio end
+        end
+        return ratio
+    end
+
     local function syncCursor()
+        if isOverlayOrUnfocused() then return end
         if not hasPermission("input.enablecursor") then return end
         local wantCursor = hudConnected and state.studioOpen and (not state.viewportLooking)
         if hasPermission("input") then
@@ -4723,6 +4877,7 @@ do (function(SOLACE)
             state.viewportLooking = false
             ui.focusedInputId = nil
             ui.activeId = nil
+            ui:cancelAutoScroll()
         elseif not camera.initialized then
             camera:initFromPlayer()
         end
@@ -4879,6 +5034,9 @@ do (function(SOLACE)
     hook.add("CalcView", "solace_freecam_view", function(origin, angles, fov, znear, zfar)
         if not state.studioOpen or not hudConnected then return end
         if not hasPermission("render.calcview") then return end
+        if isOverlayOrUnfocused() or getCpuRatio() > 0.72 then
+            return camera._viewOut.origin and camera._viewOut or nil
+        end
         return camera:calcView(origin, angles, fov, znear, zfar)
     end)
 
@@ -4909,6 +5067,12 @@ do (function(SOLACE)
     end)
 
     hook.add("InputPressed", "solace_input_pressed", function(key)
+        if key == KEY.TAB and hasPermission("input") and input.isShiftDown() then
+            lowCpuUntil = timer.realtime() + 0.8
+            ui:cancelAutoScroll()
+            return
+        end
+
         if key == KEY.F6 then
             if not f6Down then
                 f6Down = true
@@ -4918,6 +5082,11 @@ do (function(SOLACE)
         end
 
         if not state.studioOpen then return end
+
+        if key == KEY.ESCAPE and ui.autoScroll then
+            ui:cancelAutoScroll()
+            return
+        end
 
         if ui:handleKeyPressed(key) then
             return
@@ -4960,6 +5129,7 @@ do (function(SOLACE)
     hook.add("PostDrawOpaqueRenderables", "solace_viewport_3d", function(depth, skybox, skybox3d)
         if skybox or skybox3d then return end
         if not state.studioOpen then return end
+        if isOverlayOrUnfocused() or timer.realtime() < lowCpuUntil or getCpuRatio() > 0.62 then return end
         ViewportGrid.draw3D(state)
         Selection.draw3D(state, camera, sceneGraph, runtime)
     end)
@@ -4967,6 +5137,7 @@ do (function(SOLACE)
     hook.add("PostDrawTranslucentRenderables", "solace_viewport_sprites", function(depth, skybox, skybox3d)
         if skybox or skybox3d then return end
         if not state.studioOpen then return end
+        if isOverlayOrUnfocused() or timer.realtime() < lowCpuUntil or getCpuRatio() > 0.62 then return end
         runtime:drawSprites(state)
     end)
 
@@ -4976,14 +5147,14 @@ do (function(SOLACE)
         and (type(render.drawTexturedRectUV) == "function")
 
     local panelCaches = {
-        toolbar    = { rtName = "sol_rt_tb",   w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
-        toolbox    = { rtName = "sol_rt_tbx",  w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
-        explorer   = { rtName = "sol_rt_exp",  w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
-        properties = { rtName = "sol_rt_prop", w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
-        timeline   = { rtName = "sol_rt_tl",   w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
+        toolbar    = { rtName = "sol_rt_tb",   w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, lastHotId = nil, lastTooltip = nil, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
+        toolbox    = { rtName = "sol_rt_tbx",  w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, lastHotId = nil, lastTooltip = nil, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
+        explorer   = { rtName = "sol_rt_exp",  w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, lastHotId = nil, lastTooltip = nil, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
+        properties = { rtName = "sol_rt_prop", w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, lastHotId = nil, lastTooltip = nil, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
+        timeline   = { rtName = "sol_rt_tl",   w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, lastHotId = nil, lastTooltip = nil, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
     }
 
-    local function drawCachedPanel(key, rect, sig, isActiveInPanel, drawFn)
+    local function drawCachedPanel(key, rect, sig, isActiveInPanel, allowRepaint, drawFn)
         local w, h = rect.w, rect.h
         if w <= 0 or h <= 0 then return end
 
@@ -4991,11 +5162,14 @@ do (function(SOLACE)
         local numStrips = math.ceil(w / 1024)
         local totalRTH = numStrips * (h + 2) - 2
         if not rtSupported or c.failed or h > 1024 or totalRTH > 1024 then
-            drawFn(rect)
+            if allowRepaint then
+                drawFn(rect)
+            end
             return
         end
 
         if not c.created then
+            if not allowRepaint then return end
             local ok = pcall(render.createRenderTarget, c.rtName)
             if not ok then
                 c.failed = true
@@ -5006,13 +5180,23 @@ do (function(SOLACE)
         end
 
         local inPanel = ui:pointInRect(rect.x, rect.y, w, h)
+        local pointerChanged = (ui.dx ~= 0 or ui.dy ~= 0 or ui.leftPressed or ui.leftReleased or ui.leftDown or ui.middlePressed or ui.wheelDelta ~= 0)
         local dirty = (w ~= c.w) or (h ~= c.h) or (sig ~= c.sig)
-            or inPanel or c.wasInPanel
+            or (inPanel and (pointerChanged or not c.wasInPanel))
+            or (not inPanel and c.wasInPanel)
             or isActiveInPanel or c.wasActive
-            or (ui.wheelDelta ~= 0 and inPanel)
+
+        if not allowRepaint and c.w > 0 then
+            dirty = false
+        end
 
         if dirty then
             local realMx, realMy = ui.mx, ui.my
+            local prevHot = ui.hotId
+            local prevTip = ui._tooltipText
+            ui.hotId = nil
+            ui._tooltipText = nil
+
             render.selectRenderTarget(c.rtName)
             Theme.beginFrame()
             if numStrips == 1 then
@@ -5044,11 +5228,19 @@ do (function(SOLACE)
             render.selectRenderTarget(nil)
             Theme.beginFrame()
 
+            c.lastHotId = inPanel and ui.hotId or nil
+            c.lastTooltip = inPanel and ui._tooltipText or nil
+            if not c.lastHotId then ui.hotId = prevHot end
+            if not c.lastTooltip then ui._tooltipText = prevTip end
+
             c.w = w
             c.h = h
             c.sig = sig
             c.wasInPanel = inPanel
             c.wasActive = isActiveInPanel
+        elseif inPanel and not ui.autoScroll then
+            if c.lastHotId then ui.hotId = c.lastHotId end
+            if c.lastTooltip then ui:setTooltip(c.lastTooltip) end
         end
 
         render.setRenderTargetTexture(c.rtName)
@@ -5069,12 +5261,63 @@ do (function(SOLACE)
         render.setRenderTargetTexture(nil)
     end
 
+    local function updatePanelAutoScroll(rects, dt)
+        if ui.middlePressed and not state.viewportLooking and not ui.autoScroll and not ui._autoScrollConsumed then
+            if rects.toolbox.w > 0 and ui:pointInRect(rects.toolbox.x, rects.toolbox.y, rects.toolbox.w, rects.toolbox.h)
+                and Toolbox._contentH > Toolbox._viewH and Toolbox._viewH > 0 then
+                ui:beginAutoScroll("toolbox", false, true)
+            elseif rects.explorer.w > 0 and ui:pointInRect(rects.explorer.x, rects.explorer.y, rects.explorer.w, rects.explorer.h)
+                and Explorer._contentH > Explorer._viewH and Explorer._viewH > 0 then
+                ui:beginAutoScroll("explorer", false, true)
+            elseif rects.properties.w > 0 and ui:pointInRect(rects.properties.x, rects.properties.y, rects.properties.w, rects.properties.h)
+                and Properties._contentH > Properties._viewH and Properties._viewH > 0 then
+                ui:beginAutoScroll("properties", false, true)
+            elseif rects.timeline.w > 0 and ui:pointInRect(rects.timeline.x, rects.timeline.y, rects.timeline.w, rects.timeline.h) then
+                ui:beginAutoScroll("timeline", true, false)
+            end
+        end
+
+        local a = ui.autoScroll
+        if not a then return end
+
+        local dz = 8
+        local dy = ui.my - a.originY
+        local dx = ui.mx - a.originX
+
+        if a.canV and math.abs(dy) > dz then
+            local eff = (dy > 0) and (dy - dz) or (dy + dz)
+            local speed = 3.0 + math.min(7.0, math.abs(eff) * 0.04)
+            local deltaScroll = eff * speed * dt
+            if a.id == "toolbox" then
+                local maxS = math.max(0, Toolbox._contentH - Toolbox._viewH)
+                Toolbox._scrollY = math.clamp(Toolbox._scrollY + deltaScroll, 0, maxS)
+            elseif a.id == "explorer" then
+                local maxS = math.max(0, Explorer._contentH - Explorer._viewH)
+                Explorer._scrollY = math.clamp(Explorer._scrollY + deltaScroll, 0, maxS)
+            elseif a.id == "properties" then
+                local maxS = math.max(0, Properties._contentH - Properties._viewH)
+                Properties._scrollY = math.clamp(Properties._scrollY + deltaScroll, 0, maxS)
+            end
+        end
+
+        if a.canH and math.abs(dx) > dz and a.id == "timeline" then
+            local effX = (dx > 0) and (dx - dz) or (dx + dz)
+            local speed = 2.5 + math.min(6.0, math.abs(effX) * 0.035)
+            local tl = state.timeline
+            tl.scrollTime = math.clamp(tl.scrollTime + (effX * speed * dt) / math.max(25, tl.zoom), 0, math.max(0, tl.duration - 1))
+        end
+    end
+
     hook.add("DrawHUD", "solace_hud_paint", function()
         if not hasPermission("render.hud") then return end
         hudConnected = true
 
         local now = timer.realtime()
-        local dt = math.clamp(now - lastFrameTime, 0.0001, 0.25)
+        local rawDt = now - lastFrameTime
+        if rawDt > 0.12 then
+            lowCpuUntil = math.max(lowCpuUntil, now + 0.6)
+        end
+        local dt = math.clamp(rawDt, 0.0001, 0.25)
         lastFrameTime = now
         local instFps = 1 / dt
         fpsSmooth = fpsSmooth * 0.92 + instFps * 0.08
@@ -5085,9 +5328,16 @@ do (function(SOLACE)
             printConsole(string.format("[SOLACE CL] DrawHUD active (%dx%d, studioOpen=%s)", sw or 0, sh or 0, tostring(state.studioOpen)))
         end
 
+        local cpuRatio = getCpuRatio()
+        if cpuRatio > 0.78 or isOverlayOrUnfocused() then
+            return
+        end
+        local overlayPaused = (now < lowCpuUntil)
+
         Theme.beginFrame()
 
         if not state.studioOpen then
+            if overlayPaused then return end
             local scrW = render.getResolution()
             local label = "SOLACE Minimized  |  Press F6 to Open"
             Theme.setFont(Theme.Fonts.Small)
@@ -5110,8 +5360,11 @@ do (function(SOLACE)
             layout:compute(ui.scrW, ui.scrH)
 
             local rects = layout.rects
-            ViewportGrid.updateLookMode(state, ui, rects.viewport)
-            camera:update(dt, ui, rects.viewport)
+            if not overlayPaused then
+                ViewportGrid.updateLookMode(state, ui, rects.viewport)
+                camera:update(dt, ui, rects.viewport)
+                updatePanelAutoScroll(rects, dt)
+            end
 
             local sel = sceneGraph:getSelectedNode()
             local selIds = sceneGraph:getSelectedIds()
@@ -5122,26 +5375,27 @@ do (function(SOLACE)
             local blinkPhase = math.floor(ui._frameTime * 2)
             local actPrefix3 = actId and string.sub(actId, 1, 3) or ""
             local actPrefix4 = actId and string.sub(actId, 1, 4) or ""
+            local allowRepaint = (not overlayPaused) and (cpuRatio < 0.60)
 
             -- Draw docked studio panels around the live center 3D viewport cutout (1:1 RT cached when idle)
             local tbSig = state.activeTool .. ":" .. tostring(actions.hasSelection)
                 .. ":" .. tostring(state.grid.enabled) .. tostring(state.grid.showAxes) .. tostring(state.grid.showTelemetry)
                 .. ":" .. tostring(state.panels.toolbox) .. tostring(state.panels.explorer) .. tostring(state.panels.properties) .. tostring(state.panels.timeline)
-            drawCachedPanel("toolbar", rects.toolbar, tbSig, actPrefix3 == "tb_", function(r)
+            drawCachedPanel("toolbar", rects.toolbar, tbSig, actPrefix3 == "tb_", allowRepaint, function(r)
                 Toolbar.draw(ui, state, layout, r, actions)
             end)
 
             local tbxFocus = (focId == "toolbox_search" or focId == "tbx_custom_mdl")
             local tbxSig = state.activeToolboxCategory .. "|" .. state.toolboxSearch .. "|" .. state.customModelPath
                 .. "|" .. tostring(Toolbox._scrollY) .. "|" .. (tbxFocus and (focId .. ":" .. blinkPhase) or "")
-            drawCachedPanel("toolbox", rects.toolbox, tbxSig, actPrefix4 == "tbx_" or actPrefix4 == "tool", function(r)
+            drawCachedPanel("toolbox", rects.toolbox, tbxSig, actPrefix4 == "tbx_" or actPrefix4 == "tool", allowRepaint, function(r)
                 Toolbox.draw(ui, state, r, actions)
             end)
 
             local expFocus = (focId == "explorer_search")
             local expSig = sceneGraph._version .. "|" .. tostring(sel and sel.id) .. "|" .. #selIds
                 .. "|" .. state.explorerSearch .. "|" .. tostring(Explorer._scrollY) .. "|" .. (expFocus and blinkPhase or "")
-            drawCachedPanel("explorer", rects.explorer, expSig, actPrefix4 == "exp_" or actPrefix4 == "expl", function(r)
+            drawCachedPanel("explorer", rects.explorer, expSig, actPrefix4 == "exp_" or actPrefix4 == "expl", allowRepaint, function(r)
                 Explorer.draw(ui, state, sceneGraph, r, actions)
             end)
 
@@ -5161,29 +5415,31 @@ do (function(SOLACE)
                 .. "|" .. (s.quotas and math.floor(ui._frameTime * 5) or 0)
                 .. "|" .. (propFocus and blinkPhase or "")
                 .. "|" .. tostring(Properties._scrollY)
-            drawCachedPanel("properties", rects.properties, propSig, actPrefix4 == "prop" or actPrefix4 == "sec_", function(r)
+            drawCachedPanel("properties", rects.properties, propSig, actPrefix4 == "prop" or actPrefix4 == "sec_", allowRepaint, function(r)
                 Properties.draw(ui, state, sceneGraph, runtime, camera, r, actions)
             end)
 
             local tl = state.timeline
             local tlSig = sceneGraph._version .. "|" .. tostring(sel and sel.id)
                 .. "|" .. tl.currentTime .. "|" .. tl.duration .. "|" .. tl.fps .. "|" .. tl.zoom .. "|" .. tl.scrollTime
-            drawCachedPanel("timeline", rects.timeline, tlSig, actPrefix3 == "tl_", function(r)
+            drawCachedPanel("timeline", rects.timeline, tlSig, actPrefix3 == "tl_", allowRepaint, function(r)
                 Timeline.draw(ui, state, sceneGraph, r)
             end)
 
-            -- Draw viewport frame, 3D orientation triad & telemetry
-            ViewportGrid.drawOverlay(state, ui, rects.viewport, fpsSmooth, camera, sceneGraph)
+            if allowRepaint then
+                -- Draw viewport frame, 3D orientation triad & telemetry
+                ViewportGrid.drawOverlay(state, ui, rects.viewport, fpsSmooth, camera, sceneGraph)
 
-            -- Draw interactive panel splitters on top of panel borders
-            layout:updateAndDrawSplitters(ui)
+                -- Draw interactive panel splitters on top of panel borders
+                layout:updateAndDrawSplitters(ui)
 
-            -- Viewport raycast hover & click selection (only when no UI widget/splitter is hovered/active)
-            if ui.hotId == nil and ui.activeId == nil then
-                Selection.pickAtCursor(ui, state, camera, sceneGraph, runtime, rects.viewport)
-                Selection.handleClick(ui, state, camera, sceneGraph, runtime, rects.viewport)
-            else
-                Selection.hoveredId = nil
+                -- Viewport raycast hover & click selection (only when no UI widget/splitter is hovered/active)
+                if ui.hotId == nil and ui.activeId == nil and not ui.autoScroll and not ui._autoScrollConsumed then
+                    Selection.pickAtCursor(ui, state, camera, sceneGraph, runtime, rects.viewport)
+                    Selection.handleClick(ui, state, camera, sceneGraph, runtime, rects.viewport)
+                else
+                    Selection.hoveredId = nil
+                end
             end
         end)
 
@@ -5225,6 +5481,7 @@ do (function(SOLACE)
             render.drawSimpleText(mx + mw * 0.5, my + 14, msg, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
         end
 
+        ui:drawAutoScrollIcon()
         ui:drawTooltip()
         ui:endFrame(dt)
     end)
