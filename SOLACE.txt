@@ -187,17 +187,17 @@ do (function(SOLACE)
 
     -- Default dock layout sizes (pixels) & bounds
     Constants.LAYOUT_DEFAULTS = {
-        toolbarHeight = 40,
-        leftWidth = 256,
-        rightWidth = 300,
-        bottomHeight = 192,
-        explorerRatio = 0.46,
+        toolbarHeight = 38,
+        leftWidth = 240,
+        rightWidth = 280,
+        bottomHeight = 180,
+        explorerRatio = 0.44,
 
-        minLeftWidth = 180,
+        minLeftWidth = 176,
         maxLeftWidth = 420,
-        minRightWidth = 220,
+        minRightWidth = 216,
         maxRightWidth = 480,
-        minBottomHeight = 132,
+        minBottomHeight = 128,
         maxBottomHeight = 420,
         minExplorerRatio = 0.22,
         maxExplorerRatio = 0.78,
@@ -2428,13 +2428,14 @@ do (function(SOLACE)
         local textColor = disabled and Theme.C.textDisabled
             or (active and Theme.C.accentBright or Theme.C.textPrimary)
 
-        local cursorX = x + 8
+        local compact = (w < 110)
+        local cursorX = x + (compact and 5 or 8)
         if opts.icon then
-            local iconSize = math.min(14, h - 6)
+            local iconSize = math.min(compact and 12 or 14, h - 6)
             local ix = (label == nil or label == "") and (x + (w - iconSize) * 0.5) or cursorX
             local iy = y + (h - iconSize) * 0.5
             Theme.drawIcon(opts.icon, ix, iy, iconSize, textColor)
-            cursorX = cursorX + iconSize + 6
+            cursorX = cursorX + iconSize + (compact and 4 or 6)
         end
 
         if label and label ~= "" then
@@ -2463,10 +2464,10 @@ do (function(SOLACE)
     end
 
     function Widgets.stepper(ui, id, x, y, w, h, label, valueText, tooltip)
-        local labelW = math.floor(w * 0.48)
+        local labelW = math.floor(w * 0.44)
         local ctrlX = x + labelW
         local ctrlW = w - labelW
-        local btnW = 20
+        local btnW = 18
 
         Theme.setFont(Theme.Fonts.Body)
         Theme.setColor(Theme.C.textSecondary)
@@ -2494,7 +2495,7 @@ do (function(SOLACE)
     end
 
     function Widgets.slider(ui, id, x, y, w, h, label, value, minVal, maxVal, step, fmt, tooltip)
-        local labelW = math.floor(w * 0.48)
+        local labelW = math.floor(w * 0.44)
         local trackX = x + labelW
         local trackW = math.max(40, w - labelW)
 
@@ -2679,6 +2680,9 @@ do (function(SOLACE)
             rightW = d.rightWidth,
             bottomH = d.bottomHeight,
             explorerRatio = d.explorerRatio,
+            _customized = false,
+            _lastScrW = 0,
+            _lastScrH = 0,
             rects = {
                 toolbar = { x = 0, y = 0, w = 0, h = 0 },
                 toolbox = { x = 0, y = 0, w = 0, h = 0 },
@@ -2691,16 +2695,41 @@ do (function(SOLACE)
         }, Layout)
     end
 
-    function Layout:reset()
+    function Layout:applyResponsiveDefaults(scrW, scrH)
         local d = Constants.LAYOUT_DEFAULTS
-        self.leftW = d.leftWidth
-        self.rightW = d.rightWidth
-        self.bottomH = d.bottomHeight
+        self.toolbarH = (scrH < 820) and 34 or d.toolbarHeight
+        self.leftW = math.clamp(math.floor(scrW * 0.145), d.minLeftWidth, d.maxLeftWidth)
+        if self.leftW > 244 then self.leftW = 244 end
+        self.rightW = math.clamp(math.floor(scrW * 0.175), d.minRightWidth, d.maxRightWidth)
+        if self.rightW > 288 then self.rightW = 288 end
+        self.bottomH = math.clamp(math.floor(scrH * 0.18), d.minBottomHeight, d.maxBottomHeight)
+        if self.bottomH > 184 then self.bottomH = 184 end
         self.explorerRatio = d.explorerRatio
+    end
+
+    function Layout:reset()
+        self._customized = false
+        if self._lastScrW > 0 and self._lastScrH > 0 then
+            self:applyResponsiveDefaults(self._lastScrW, self._lastScrH)
+        else
+            local d = Constants.LAYOUT_DEFAULTS
+            self.toolbarH = d.toolbarHeight
+            self.leftW = d.leftWidth
+            self.rightW = d.rightWidth
+            self.bottomH = d.bottomHeight
+            self.explorerRatio = d.explorerRatio
+        end
     end
 
     function Layout:compute(scrW, scrH)
         local d = Constants.LAYOUT_DEFAULTS
+        if scrW ~= self._lastScrW or scrH ~= self._lastScrH then
+            self._lastScrW = scrW
+            self._lastScrH = scrH
+            if not self._customized then
+                self:applyResponsiveDefaults(scrW, scrH)
+            end
+        end
         local sp = d.splitterSize
         local panels = self.state.panels
 
@@ -2837,6 +2866,7 @@ do (function(SOLACE)
             end
 
             if captured and ui.leftDown then
+                self._customized = true
                 if s.id == "split_left" then
                     self.leftW = math.clamp(ui.mx, d.minLeftWidth, d.maxLeftWidth)
                 elseif s.id == "split_right" then
@@ -3176,9 +3206,49 @@ do (function(SOLACE)
 
         ui:pushClip(x, y, w, h)
 
-        local cx = x + 10
-        local btnH = 26
+        local btnH = math.min(26, h - 8)
         local by = y + math.floor((h - btnH) * 0.5)
+        local compactBar = (w < 1440)
+
+        -- Right-aligned working panel toggles, Reset Layout & Hide Studio (F6) first so left side knows exact maxLeftX
+        local rx = x + w - 8
+
+        local hideW = compactBar and 68 or 78
+        rx = rx - hideW
+        if Widgets.button(ui, "tb_hide", rx, by, hideW, btnH, "Hide F6", {
+            icon = "hide",
+            tooltip = "Minimize SOLACE Studio and restore gameplay camera/cursor (Press F6 to reopen)",
+        }) then
+            actions.toggleStudio(false)
+        end
+        rx = rx - 5
+
+        local resetW = compactBar and 48 or 54
+        rx = rx - resetW
+        if Widgets.button(ui, "tb_reset_layout", rx, by, resetW, btnH, "Reset", {
+            icon = "reset",
+            tooltip = "Reset all dock panel sizes to default",
+        }) then
+            layout:reset()
+        end
+        rx = rx - 6
+
+        local panelW = compactBar and 34 or 40
+        for _, p in ipairs(TOOLBAR_PANELS) do
+            rx = rx - panelW
+            if rx > x + 90 then
+                if Widgets.button(ui, "tb_panel_" .. p.key, rx, by, panelW, btnH, p.label, {
+                    active = state.panels[p.key],
+                    tooltip = p.tip,
+                }) then
+                    state.panels[p.key] = not state.panels[p.key]
+                end
+            end
+            rx = rx - 3
+        end
+
+        local maxLeftX = rx - 8
+        local cx = x + 10
 
         -- Brand identity badge
         Theme.setFont(Theme.Fonts.Title)
@@ -3189,20 +3259,23 @@ do (function(SOLACE)
         end
         cx = cx + _brandW + 8
 
-        Theme.setFont(Theme.Fonts.Small)
-        Theme.setColor(Theme.C.textMuted)
-        render.drawSimpleText(cx, y + h * 0.5, "P2", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
-        cx = cx + 22
+        if not compactBar then
+            Theme.setFont(Theme.Fonts.Small)
+            Theme.setColor(Theme.C.textMuted)
+            render.drawSimpleText(cx, y + h * 0.5, "P2", TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+            cx = cx + 22
+        end
 
         Theme.setColor(Theme.C.border)
         render.drawLine(cx, y + 7, cx, y + h - 7)
         cx = cx + 8
 
-        -- Tool buttons
+        -- Tool buttons (icon-only for upcoming tools on narrow screens so all actions fit cleanly)
         for _, tool in ipairs(Constants.TOOLS) do
-            local tw = tool.ready and 72 or 76
-            if cx + tw > x + w - 260 then break end
-            local clicked = Widgets.button(ui, "tb_tool_" .. tool.id, cx, by, tw, btnH, tool.label, {
+            local useLabel = (not compactBar) or tool.ready
+            local tw = useLabel and (compactBar and 64 or 72) or 28
+            if cx + tw > maxLeftX then break end
+            local clicked = Widgets.button(ui, "tb_tool_" .. tool.id, cx, by, tw, btnH, useLabel and tool.label or nil, {
                 icon = tool.icon,
                 active = tool.ready and (state.activeTool == tool.id),
                 disabled = not tool.ready,
@@ -3214,73 +3287,80 @@ do (function(SOLACE)
             cx = cx + tw + 4
         end
 
-        Theme.setColor(Theme.C.border)
-        render.drawLine(cx + 2, y + 7, cx + 2, y + h - 7)
-        cx = cx + 10
+        if cx + 10 <= maxLeftX then
+            Theme.setColor(Theme.C.border)
+            render.drawLine(cx + 2, y + 7, cx + 2, y + h - 7)
+            cx = cx + 10
+        end
 
         -- Phase 2 Quick Actions: Focus Selected & Quick Spawn Cube
-        if cx + 70 < x + w - 280 then
-            if Widgets.button(ui, "tb_focus", cx, by, 68, btnH, "Focus", {
+        local focusW = compactBar and 58 or 68
+        if cx + focusW <= maxLeftX then
+            if Widgets.button(ui, "tb_focus", cx, by, focusW, btnH, "Focus", {
                 icon = "camera",
                 disabled = not actions.hasSelection,
                 tooltip = "Focus Freecam on Selected Object (Hotkey: F)",
             }) then
                 actions.focusSelected()
             end
-            cx = cx + 72
+            cx = cx + focusW + 4
         end
 
-        if cx + 74 < x + w - 280 then
-            if Widgets.button(ui, "tb_spawn_cube", cx, by, 72, btnH, "+Cube", {
+        local cubeW = compactBar and 62 or 72
+        if cx + cubeW <= maxLeftX then
+            if Widgets.button(ui, "tb_spawn_cube", cx, by, cubeW, btnH, "+Cube", {
                 icon = "cube",
                 tooltip = "Spawn Cube Hologram in front of Freecam",
             }) then
                 actions.spawnQuickModel("Cube", "models/hunter/blocks/cube1x1x1.mdl")
             end
-            cx = cx + 76
+            cx = cx + cubeW + 4
         end
 
         -- Viewport Toggles
-        if cx + 66 < x + w - 280 then
-            if Widgets.button(ui, "tb_grid", cx, by, 62, btnH, "Grid", {
+        local gridW = compactBar and 52 or 62
+        if cx + gridW <= maxLeftX then
+            if Widgets.button(ui, "tb_grid", cx, by, gridW, btnH, "Grid", {
                 icon = "grid",
                 active = state.grid.enabled,
                 tooltip = "Toggle 3D Ground Grid (G)",
             }) then
                 state.grid.enabled = not state.grid.enabled
             end
-            cx = cx + 66
+            cx = cx + gridW + 4
         end
 
-        if cx + 66 < x + w - 280 then
-            if Widgets.button(ui, "tb_axes", cx, by, 62, btnH, "Axes", {
+        local axesW = compactBar and 52 or 62
+        if cx + axesW <= maxLeftX then
+            if Widgets.button(ui, "tb_axes", cx, by, axesW, btnH, "Axes", {
                 icon = "axes",
                 active = state.grid.showAxes,
                 tooltip = "Toggle 3D Origin Axes",
             }) then
                 state.grid.showAxes = not state.grid.showAxes
             end
-            cx = cx + 66
+            cx = cx + axesW + 4
         end
 
-        if cx + 68 < x + w - 280 then
-            if Widgets.button(ui, "tb_stats", cx, by, 64, btnH, "Stats", {
+        local statsW = compactBar and 54 or 64
+        if cx + statsW <= maxLeftX then
+            if Widgets.button(ui, "tb_stats", cx, by, statsW, btnH, "Stats", {
                 icon = "scene",
                 active = state.grid.showTelemetry,
                 tooltip = "Toggle Viewport Telemetry HUD",
             }) then
                 state.grid.showTelemetry = not state.grid.showTelemetry
             end
-            cx = cx + 68
+            cx = cx + statsW + 4
         end
 
         -- Upcoming Transport / History / Project buttons
-        if cx + 195 < x + w - 290 then
+        if cx + 40 <= maxLeftX then
             Theme.setColor(Theme.C.border)
             render.drawLine(cx + 2, y + 7, cx + 2, y + h - 7)
             cx = cx + 10
             for _, item in ipairs(TOOLBAR_UPCOMING) do
-                if cx + item.w > x + w - 290 then break end
+                if cx + item.w > maxLeftX then break end
                 Widgets.button(ui, "tb_" .. item.id, cx, by, item.w, btnH, item.label, {
                     icon = item.icon,
                     disabled = true,
@@ -3288,43 +3368,6 @@ do (function(SOLACE)
                 })
                 cx = cx + item.w + 4
             end
-        end
-
-        -- Right-aligned working panel toggles, Reset Layout & Hide Studio (F6)
-        local rx = x + w - 10
-
-        local hideW = 78
-        rx = rx - hideW
-        if Widgets.button(ui, "tb_hide", rx, by, hideW, btnH, "Hide F6", {
-            icon = "hide",
-            tooltip = "Minimize SOLACE Studio and restore gameplay camera/cursor (Press F6 to reopen)",
-        }) then
-            actions.toggleStudio(false)
-        end
-        rx = rx - 6
-
-        local resetW = 54
-        rx = rx - resetW
-        if Widgets.button(ui, "tb_reset_layout", rx, by, resetW, btnH, "Reset", {
-            icon = "reset",
-            tooltip = "Reset all dock panel sizes to default",
-        }) then
-            layout:reset()
-        end
-        rx = rx - 8
-
-        for _, p in ipairs(TOOLBAR_PANELS) do
-            local pw = 40
-            rx = rx - pw
-            if rx > cx + 8 then
-                if Widgets.button(ui, "tb_panel_" .. p.key, rx, by, pw, btnH, p.label, {
-                    active = state.panels[p.key],
-                    tooltip = p.tip,
-                }) then
-                    state.panels[p.key] = not state.panels[p.key]
-                end
-            end
-            rx = rx - 3
         end
 
         ui:popClip()
@@ -3399,18 +3442,19 @@ do (function(SOLACE)
         local btnW = math.floor((bw - pad * 2 - gap * 3) / 4)
         local selNode = sceneGraph:getSelectedNode()
         local canDelete = (selNode ~= nil and selNode.id ~= sceneGraph:getRootId())
+        local compactExp = (btnW < 52)
 
-        if Widgets.button(ui, "exp_add_grp", bx + pad, actY, btnW, 20, "+Grp", {
+        if Widgets.button(ui, "exp_add_grp", bx + pad, actY, btnW, 20, compactExp and "+G" or "+Grp", {
             tooltip = "Create Group under selected container or root",
         }) then
             actions.spawnGroup()
         end
-        if Widgets.button(ui, "exp_add_fld", bx + pad + (btnW + gap), actY, btnW, 20, "+Fld", {
+        if Widgets.button(ui, "exp_add_fld", bx + pad + (btnW + gap), actY, btnW, 20, compactExp and "+F" or "+Fld", {
             tooltip = "Create Folder under selected container or root",
         }) then
             actions.spawnFolder()
         end
-        if Widgets.button(ui, "exp_focus", bx + pad + (btnW + gap) * 2, actY, btnW, 20, "Focus", {
+        if Widgets.button(ui, "exp_focus", bx + pad + (btnW + gap) * 2, actY, btnW, 20, compactExp and "Foc" or "Focus", {
             disabled = not canDelete,
             tooltip = "Focus Freecam on selected object (F)",
         }) then
@@ -3521,9 +3565,11 @@ do (function(SOLACE)
                 Theme.setColor(isSel and Theme.C.textPrimary or Theme.C.textSecondary, textAlpha)
                 render.drawSimpleText(iconX + 18, curY + rowH * 0.5, node.name, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
 
-                Theme.setFont(Theme.Fonts.Small)
-                Theme.setColor(Theme.C.textMuted, textAlpha)
-                render.drawSimpleText(eyeX - 6, curY + rowH * 0.5, node.kind, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+                if eyeX - (iconX + 18) >= 128 then
+                    Theme.setFont(Theme.Fonts.Small)
+                    Theme.setColor(Theme.C.textMuted, textAlpha)
+                    render.drawSimpleText(eyeX - 6, curY + rowH * 0.5, node.kind, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+                end
             end
             curY = curY + rowH
         end
@@ -3715,9 +3761,9 @@ do (function(SOLACE)
                 if curY + nh >= by and curY <= visBottom then
                     nh = Widgets.phaseNotice(
                         bx + pad, curY, innerW,
-                        "Interactive Transform Gizmos",
-                        { "Move / Rotate / Scale editing & numeric", "transform boxes arrive in Phase 3 & 4." },
-                        "Phase 3-4"
+                        "Transform Gizmos",
+                        { "Move / Rotate / Scale & numeric", "boxes arrive in Phase 3-4." },
+                        "P3-4"
                     )
                 end
                 curY = curY + nh + 8
@@ -4006,7 +4052,7 @@ do (function(SOLACE)
 
         -- Transport & ruler strip
         local stripH = 28
-        local headerColW = math.min(230, math.floor(bw * 0.28))
+        local headerColW = math.clamp(math.floor(bw * 0.22), 198, 224)
 
         Theme.setColor(Theme.C.bgPanelAlt)
         render.drawRectFast(bx, by, bw, stripH)
@@ -4331,8 +4377,8 @@ do (function(SOLACE)
         end
         curY = curY + 30
 
-        -- Category buttons (2 columns)
-        local cols = innerW >= 200 and 2 or 1
+        -- Category buttons (2 columns when wide enough)
+        local cols = innerW >= 196 and 2 or 1
         local gap = 4
         local cellW = math.floor((innerW - gap * (cols - 1)) / cols)
         local cellH = 24
@@ -4927,7 +4973,7 @@ do (function(SOLACE)
     local rtSupported = (type(render.createRenderTarget) == "function")
         and (type(render.selectRenderTarget) == "function")
         and (type(render.setRenderTargetTexture) == "function")
-        and (type(render.drawTexturedRectUVFast) == "function")
+        and (type(render.drawTexturedRectUV) == "function")
 
     local panelCaches = {
         toolbar    = { rtName = "sol_rt_tb",   w = 0, h = 0, sig = nil, wasInPanel = false, wasActive = false, created = false, failed = false, localRect = { x = 0, y = 0, w = 0, h = 0 } },
@@ -4942,7 +4988,9 @@ do (function(SOLACE)
         if w <= 0 or h <= 0 then return end
 
         local c = panelCaches[key]
-        if not rtSupported or c.failed or w > 2048 or h > 1024 or (w > 1024 and h > 510) then
+        local numStrips = math.ceil(w / 1024)
+        local totalRTH = numStrips * (h + 2) - 2
+        if not rtSupported or c.failed or h > 1024 or totalRTH > 1024 then
             drawFn(rect)
             return
         end
@@ -4967,7 +5015,7 @@ do (function(SOLACE)
             local realMx, realMy = ui.mx, ui.my
             render.selectRenderTarget(c.rtName)
             Theme.beginFrame()
-            if w <= 1024 then
+            if numStrips == 1 then
                 ui.mx = realMx - rect.x
                 ui.my = realMy - rect.y
                 c.localRect.x = 0
@@ -4976,26 +5024,20 @@ do (function(SOLACE)
                 c.localRect.h = h
                 drawFn(c.localRect)
             else
-                ui.mx = realMx - rect.x
-                ui.my = realMy - rect.y
-                c.localRect.x = 0
-                c.localRect.y = 0
-                c.localRect.w = w
-                c.localRect.h = h
-                ui:pushClip(0, 0, 1024, h)
-                drawFn(c.localRect)
-                ui:popClip()
-
-                local offY = h + 2
-                ui.mx = realMx - rect.x - 1024
-                ui.my = realMy - rect.y - offY
-                c.localRect.x = -1024
-                c.localRect.y = offY
-                c.localRect.w = w
-                c.localRect.h = h
-                ui:pushClip(0, offY, w - 1024, h)
-                drawFn(c.localRect)
-                ui:popClip()
+                for s = 0, numStrips - 1 do
+                    local offX = s * 1024
+                    local offY = s * (h + 2)
+                    local stripW = math.min(1024, w - offX)
+                    ui.mx = realMx - rect.x - offX
+                    ui.my = realMy - rect.y - offY
+                    c.localRect.x = -offX
+                    c.localRect.y = offY
+                    c.localRect.w = w
+                    c.localRect.h = h
+                    ui:pushClip(0, offY, stripW, h)
+                    drawFn(c.localRect)
+                    ui:popClip()
+                end
             end
             ui.mx = realMx
             ui.my = realMy
@@ -5011,13 +5053,18 @@ do (function(SOLACE)
 
         render.setRenderTargetTexture(c.rtName)
         Theme.setRGBA(255, 255, 255, 255)
-        if w <= 1024 then
-            render.drawTexturedRectUVFast(rect.x, rect.y, w, h, 0, 0, w / 1024, h / 1024)
+        if numStrips == 1 then
+            render.drawTexturedRectUV(rect.x, rect.y, w, h, 0, 0, w / 1024, h / 1024)
         else
-            local remW = w - 1024
-            local offY = h + 2
-            render.drawTexturedRectUVFast(rect.x, rect.y, 1024, h, 0, 0, 1, h / 1024)
-            render.drawTexturedRectUVFast(rect.x + 1024, rect.y, remW, h, 0, offY / 1024, remW / 1024, (offY + h) / 1024)
+            for s = 0, numStrips - 1 do
+                local offX = s * 1024
+                local offY = s * (h + 2)
+                local stripW = math.min(1024, w - offX)
+                render.drawTexturedRectUV(
+                    rect.x + offX, rect.y, stripW, h,
+                    0, offY / 1024, stripW / 1024, (offY + h) / 1024
+                )
+            end
         end
         render.setRenderTargetTexture(nil)
     end
