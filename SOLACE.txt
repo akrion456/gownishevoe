@@ -1152,6 +1152,9 @@ do (function(SOLACE)
 
         self._project.nodes[id] = node
         parent.children[#parent.children + 1] = id
+        if parentId ~= self._project.rootId then
+            parent.expanded = true
+        end
 
         self:markDirty()
         if self._events then
@@ -4765,11 +4768,16 @@ do (function(SOLACE)
                 ui._topHoverWinId = "__popup__"
                 return
             end
-            if ui.leftPressed or ui.rightPressed then
+            if ui.leftPressed then
                 -- Close popup on click outside without clicking through to elements underneath
                 ImGui._activePopupCloseRequested = true
                 ui._topHoverWinId = "__popup__"
                 return
+            elseif ui.rightPressed then
+                -- Dismiss old popup immediately so right-clicking another Explorer row opens its context menu directly
+                ImGui._activePopup = nil
+                ImGui._activePopupRect = nil
+                ImGui._activePopupCloseRequested = false
             end
         end
 
@@ -5840,7 +5848,7 @@ do (function(SOLACE)
         for i = startIdx, endIdx do
             local it = items[i]
             if type(it) == "table" and it.separator then
-                Theme.setColor(Theme.C.divider)
+                Theme.setColor(Theme.C.border)
                 render.drawRectFast(px + 8, curY + 3, popW - 16, 1)
                 curY = curY + sepH
             else
@@ -7201,11 +7209,11 @@ do (function(SOLACE)
         Theme.setColor(Theme.C.border)
         render.drawLine(bx, listY - 1, bx + bw, listY - 1)
 
-        -- Promote drag candidate once pointer moves >= 5px
+        -- Promote drag candidate once pointer moves >= 4px (handles fast drag-release too)
         if Explorer._dragCandidate then
-            if ui.leftDown then
+            if ui.leftDown or ui.leftReleased then
                 local dist = math.abs(ui.mx - Explorer._dragCandidate.startX) + math.abs(ui.my - Explorer._dragCandidate.startY)
-                if dist >= 5 then
+                if dist >= 4 then
                     local cid = Explorer._dragCandidate.id
                     Explorer._draggingId = cid
                     Explorer._dragCandidate = nil
@@ -7216,12 +7224,28 @@ do (function(SOLACE)
                     end
                     if #Explorer._dragIds == 0 then
                         Explorer.cancelDrag(ui)
-                    else
+                    elseif ui.leftDown then
                         ui:capture("exp_drag")
                     end
+                elseif ui.leftReleased then
+                    Explorer._dragCandidate = nil
                 end
             else
                 Explorer._dragCandidate = nil
+            end
+        end
+
+        -- Recover cleanly if mouse release happened off-frame while dragging
+        if Explorer._draggingId and not ui.leftDown and not ui.leftReleased then
+            Explorer.cancelDrag(ui)
+        end
+
+        -- Edge auto-scroll during drag
+        if Explorer._draggingId and maxScroll > 0 and ui:pointInRect(bx, listY, bw, listH) then
+            if ui.my < listY + 18 then
+                Explorer._scrollY = math.clamp(Explorer._scrollY - 6, 0, maxScroll)
+            elseif ui.my > listY + listH - 18 then
+                Explorer._scrollY = math.clamp(Explorer._scrollY + 6, 0, maxScroll)
             end
         end
 
@@ -7330,13 +7354,14 @@ do (function(SOLACE)
                 if Explorer._draggingId and ui:pointInRect(bx + 2, curY, rowW, rowH) and ui:pointInRect(bx, listY, bw, listH) then
                     local relY = ui.my - curY
                     local isContainer = sceneGraph:canAcceptChild(node.id)
+                    local fullInto = isContainer and ((#node.children == 0) or not node.expanded)
                     local mode, targetParentId, insertIdx, drawY
                     if node.id == rootId then
                         mode = "into"
                         targetParentId = rootId
                         insertIdx = #node.children + 1
                         drawY = curY
-                    elseif isContainer and relY >= 4 and relY <= rowH - 4 then
+                    elseif isContainer and (fullInto or (relY >= 2 and relY <= rowH - 2)) then
                         mode = "into"
                         targetParentId = node.id
                         insertIdx = #node.children + 1
@@ -7404,9 +7429,12 @@ do (function(SOLACE)
                         end,
                     })
                 else
+                    local textClipW = math.max(20, eyeX - (iconX + 18) - 4)
+                    ui:pushClip(iconX + 16, curY, textClipW, rowH)
                     Theme.setFont(isSel and Theme.Fonts.BodyBold or Theme.Fonts.Body)
                     Theme.setColor(isSel and Theme.C.textPrimary or Theme.C.textSecondary, textAlpha)
                     render.drawSimpleText(iconX + 18, curY + rowH * 0.5, node.name, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+                    ui:popClip()
 
                     if eyeX - (iconX + 18) >= 128 then
                         Theme.setFont(Theme.Fonts.Small)
@@ -7446,10 +7474,10 @@ do (function(SOLACE)
             local sx = ui.mx + (ui._rtOffsetX or 0)
             local sy = ui.my + (ui._rtOffsetY or 0)
             openExplorerContextMenu(ui, state, sceneGraph, actions, rightClickedNode, sx, sy)
-        elseif not anyRowHovered and ui.rightPressed and ui:pointInRect(bx, listY, bw, listH) and ui:canInteractCurrentWindow() then
+        elseif not anyRowHovered and ui.rightPressed and ui:pointInRect(bx, by + 28, bw, bh - 28) and ui:canInteractCurrentWindow() then
             local sx = ui.mx + (ui._rtOffsetX or 0)
             local sy = ui.my + (ui._rtOffsetY or 0)
-            openExplorerContextMenu(ui, state, sceneGraph, actions, nil, sx, sy)
+            openExplorerContextMenu(ui, state, sceneGraph, actions, sceneGraph:getSelectedNode(), sx, sy)
         end
 
         -- Visual drop indicator + drag ghost pill
@@ -8764,6 +8792,50 @@ do (function(SOLACE)
                 )
             end
             curY = curY + nh + 8
+        elseif state.activeToolboxCategory == "holograms" then
+            if curY + 15 >= by and curY <= visBottom then
+                Theme.setFont(Theme.Fonts.Small)
+                Theme.setColor(Theme.C.textSecondary)
+                render.drawSimpleText(bx + pad, curY, "Hologram Primitives (Click to Spawn)", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            end
+            curY = curY + 16
+
+            local list = getFilteredModels(q)
+            local shown = 0
+            for _, entry in ipairs(list) do
+                if entry.category == "Primitive" then
+                    shown = shown + 1
+                    if curY + 24 >= by and curY <= visBottom then
+                        if Widgets.button(ui, "holo_" .. entry.id, bx + pad, curY, innerW, 24, entry.name, {
+                            icon = "cube",
+                            subtle = true,
+                            tooltip = entry.model,
+                        }) then
+                            actions.spawnQuickModel(entry.name, entry.model)
+                        end
+                    end
+                    curY = curY + 26
+                end
+            end
+            if shown == 0 then
+                if curY + 16 >= by and curY <= visBottom then
+                    Theme.setFont(Theme.Fonts.Small)
+                    Theme.setColor(Theme.C.textMuted)
+                    render.drawSimpleText(bx + pad, curY, "No hologram primitives match filter.", TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+                end
+                curY = curY + 20
+            end
+            curY = curY + 4
+            if curY + 24 >= by and curY <= visBottom then
+                if Widgets.button(ui, "holo_new_grp", bx + pad, curY, innerW, 24, "+ Spawn Group Container", {
+                    icon = "group",
+                    subtle = true,
+                    tooltip = "Spawn an empty Group container in scene",
+                }) then
+                    actions.spawnGroup()
+                end
+            end
+            curY = curY + 26
         else
             local nh = Widgets.phaseNotice(
                 bx + pad,
@@ -8773,8 +8845,8 @@ do (function(SOLACE)
                 {
                     activeCatInfo.desc,
                     "",
-                    "Use the Models or Sprites tabs above",
-                    "to spawn objects in Phase 2.",
+                    "Use Models, Sprites, or Holograms",
+                    "tabs above to spawn objects.",
                 },
                 "Upcoming"
             )
@@ -9504,20 +9576,6 @@ do (function(SOLACE)
         camera:focusNode(sceneGraph, runtime)
     end
 
-    function actions.spawnQuickModel(name, modelPath)
-        local posTbl, angTbl = camera:getSpawnTransform(state.spawnDistance)
-        local parentId = getTargetContainerParentId()
-        local node = sceneGraph:createModel(name, modelPath, posTbl, angTbl, parentId)
-        sceneGraph:setSelectedId(node.id)
-    end
-
-    function actions.spawnSprite(name, matPath)
-        local posTbl = camera:getSpawnTransform(state.spawnDistance)
-        local parentId = getTargetContainerParentId()
-        local node = sceneGraph:createSprite(name, matPath, posTbl, parentId)
-        sceneGraph:setSelectedId(node.id)
-    end
-
     local function cloneTransformSnap(t)
         return {
             pos = IR.cloneVec3(t.pos),
@@ -9533,11 +9591,41 @@ do (function(SOLACE)
         return out
     end
 
+    local function worldSpawnToParentLocal(parentId, wPosTbl, wAngTbl)
+        local wp = IR.toVector(wPosTbl or { 0, 0, 0 })
+        local wa = IR.toAngle(wAngTbl or { 0, 0, 0 })
+        local lPos, lAng = Math3D.worldTransformToParentLocal(sceneGraph, parentId, wp, wa, Vector(1, 1, 1))
+        return lPos, lAng
+    end
+
+    function actions.spawnQuickModel(name, modelPath)
+        local wPosTbl, wAngTbl = camera:getSpawnTransform(state.spawnDistance)
+        local parentId = getTargetContainerParentId()
+        if not sceneGraph:canAcceptChild(parentId) then parentId = sceneGraph:getRootId() end
+        local lPos, lAng = worldSpawnToParentLocal(parentId, wPosTbl, wAngTbl)
+        local snap = sceneGraph:buildNodeSnapshot(Constants.NODE_KINDS.MODEL, name or "Model", lPos, lAng, { appearance = { model = modelPath } })
+        local prevSel = copyList(sceneGraph:getSelectedIds())
+        local prevPrim = sceneGraph:getSelectedId()
+        return commands:execute(Commands.createAddNodeCommand(sceneGraph, "Spawn " .. (name or "Model"), snap, parentId, nil, prevSel, prevPrim))
+    end
+
+    function actions.spawnSprite(name, matPath)
+        local wPosTbl = camera:getSpawnTransform(state.spawnDistance)
+        local parentId = getTargetContainerParentId()
+        if not sceneGraph:canAcceptChild(parentId) then parentId = sceneGraph:getRootId() end
+        local lPos = worldSpawnToParentLocal(parentId, wPosTbl, { 0, 0, 0 })
+        local snap = sceneGraph:buildNodeSnapshot(Constants.NODE_KINDS.SPRITE, name or "Sprite", lPos, { 0, 0, 0 }, { appearance = { material = matPath } })
+        local prevSel = copyList(sceneGraph:getSelectedIds())
+        local prevPrim = sceneGraph:getSelectedId()
+        return commands:execute(Commands.createAddNodeCommand(sceneGraph, "Spawn " .. (name or "Sprite"), snap, parentId, nil, prevSel, prevPrim))
+    end
+
     function actions.spawnGroup(parentOverride)
-        local posTbl = camera:getSpawnTransform(state.spawnDistance)
+        local wPosTbl = camera:getSpawnTransform(state.spawnDistance)
         local parentId = parentOverride or getTargetContainerParentId()
         if not sceneGraph:canAcceptChild(parentId) then parentId = sceneGraph:getRootId() end
-        local snap = sceneGraph:buildNodeSnapshot(Constants.NODE_KINDS.GROUP, "Group", posTbl, { 0, 0, 0 })
+        local lPos = worldSpawnToParentLocal(parentId, wPosTbl, { 0, 0, 0 })
+        local snap = sceneGraph:buildNodeSnapshot(Constants.NODE_KINDS.GROUP, "Group", lPos, { 0, 0, 0 })
         local prevSel = copyList(sceneGraph:getSelectedIds())
         local prevPrim = sceneGraph:getSelectedId()
         return commands:execute(Commands.createAddNodeCommand(sceneGraph, "Create Group", snap, parentId, nil, prevSel, prevPrim))
@@ -9887,6 +9975,18 @@ do (function(SOLACE)
     print(startupMsg)
     printConsole(startupMsg)
 
+    local permPrompted = false
+    local function ensurePermissionsPrompted()
+        if permPrompted then return end
+        if type(permissionRequestSatisfied) == "function" and type(sendPermissionRequest) == "function" then
+            local okSat, sat = pcall(permissionRequestSatisfied)
+            if okSat and not sat and isHudActiveSafe() then
+                permPrompted = true
+                pcall(sendPermissionRequest)
+            end
+        end
+    end
+
     timer.simple(0.05, function()
         resolveOrigin()
         camera:initFromPlayer()
@@ -9896,6 +9996,7 @@ do (function(SOLACE)
         if isHudActiveSafe() then
             hudConnected = true
             syncCursor()
+            ensurePermissionsPrompted()
         end
         printConsole(formatDiagState("[SOLACE CL] Post-init"))
     end)
@@ -9913,6 +10014,7 @@ do (function(SOLACE)
         end
         if isHudActiveSafe() then
             hudConnected = true
+            ensurePermissionsPrompted()
         end
         setStudioOpen(true)
         local msg = formatDiagState("[SOLACE CL] Chip used (E)")
@@ -9927,6 +10029,7 @@ do (function(SOLACE)
                 camera:initFromPlayer()
             end
             syncCursor()
+            ensurePermissionsPrompted()
             printConsole(formatDiagState("[SOLACE CL] HUDConnected"))
         end
     end)
@@ -10383,6 +10486,9 @@ do (function(SOLACE)
             local actPrefix3 = actId and string.sub(actId, 1, 3) or ""
             local actPrefix4 = actId and string.sub(actId, 1, 4) or ""
             local allowRepaint = (not overlayPaused) and (cpuRatio < 0.60)
+            local hasInputEdge = ui.leftPressed or ui.leftReleased or ui.rightPressed or ui.rightReleased
+                or (Explorer._draggingId ~= nil) or (Explorer._dragCandidate ~= nil) or (ImGui._activePopup ~= nil)
+            local panelAllowRepaint = allowRepaint or hasInputEdge
             local tv = Theme._version or 1
 
             -- Draw docked studio panels around the live center 3D viewport cutout (1:1 RT cached when idle)
@@ -10393,14 +10499,14 @@ do (function(SOLACE)
                 .. ":" .. tostring(state.grid.enabled) .. tostring(state.grid.showAxes) .. tostring(state.grid.showTelemetry) .. tostring(state.debugMode)
                 .. ":" .. tostring(state.panels.toolbox) .. tostring(state.panels.explorer) .. tostring(state.panels.properties) .. tostring(state.panels.timeline)
                 .. ":" .. winFlags .. ":" .. fltFlags
-            drawCachedPanel("toolbar", rects.toolbar, tbSig, actPrefix3 == "tb_", allowRepaint, function(r)
+            drawCachedPanel("toolbar", rects.toolbar, tbSig, actPrefix3 == "tb_", panelAllowRepaint, function(r)
                 Toolbar.draw(ui, state, layout, r, actions)
             end)
 
             local tbxFocus = (focId == "toolbox_search" or focId == "tbx_custom_mdl")
             local tbxSig = tv .. "|" .. state.activeToolboxCategory .. "|" .. state.toolboxSearch .. "|" .. state.customModelPath
                 .. "|" .. tostring(Toolbox._scrollY) .. "|" .. (tbxFocus and (focId .. ":" .. blinkPhase) or "")
-            drawCachedPanel("toolbox", rects.toolbox, tbxSig, actPrefix4 == "tbx_" or actPrefix4 == "tool", allowRepaint, function(r)
+            drawCachedPanel("toolbox", rects.toolbox, tbxSig, actPrefix4 == "tbx_" or actPrefix4 == "tool", panelAllowRepaint, function(r)
                 Toolbox.draw(ui, state, r, actions)
             end)
 
@@ -10410,7 +10516,7 @@ do (function(SOLACE)
                 .. "|" .. state.explorerSearch .. "|" .. tostring(Explorer._scrollY)
                 .. "|" .. tostring(Explorer._renamingId) .. "|" .. tostring(Explorer._draggingId)
                 .. "|" .. (expFocus and (tostring(focId) .. ":" .. expBuf .. ":" .. blinkPhase) or "")
-            drawCachedPanel("explorer", rects.explorer, expSig, actPrefix4 == "exp_" or actPrefix4 == "expl", allowRepaint, function(r)
+            drawCachedPanel("explorer", rects.explorer, expSig, actPrefix4 == "exp_" or actPrefix4 == "expl" or (Explorer._draggingId ~= nil) or (Explorer._dragCandidate ~= nil), panelAllowRepaint, function(r)
                 Explorer.draw(ui, state, sceneGraph, r, actions)
             end)
 
@@ -10434,18 +10540,18 @@ do (function(SOLACE)
                 .. "|" .. (s.quotas and math.floor(ui._frameTime * 5) or 0)
                 .. "|" .. (propFocus and (tostring(focId) .. ":" .. propBuf .. ":" .. blinkPhase) or "")
                 .. "|" .. tostring(Properties._scrollY)
-            drawCachedPanel("properties", rects.properties, propSig, actPrefix4 == "prop" or actPrefix4 == "sec_", allowRepaint, function(r)
+            drawCachedPanel("properties", rects.properties, propSig, actPrefix4 == "prop" or actPrefix4 == "sec_", panelAllowRepaint, function(r)
                 Properties.draw(ui, state, sceneGraph, runtime, camera, r, actions)
             end)
 
             local tl = state.timeline
             local tlSig = tv .. "|" .. sceneGraph._version .. "|" .. tostring(sel and sel.id)
                 .. "|" .. tl.currentTime .. "|" .. tl.duration .. "|" .. tl.fps .. "|" .. tl.zoom .. "|" .. tl.scrollTime
-            drawCachedPanel("timeline", rects.timeline, tlSig, actPrefix3 == "tl_", allowRepaint, function(r)
+            drawCachedPanel("timeline", rects.timeline, tlSig, actPrefix3 == "tl_", panelAllowRepaint, function(r)
                 Timeline.draw(ui, state, sceneGraph, r)
             end)
 
-            if allowRepaint then
+            if panelAllowRepaint then
                 -- Draw viewport frame, 3D orientation triad & telemetry
                 ViewportGrid.drawOverlay(state, ui, rects.viewport, fpsSmooth, camera, sceneGraph)
 
@@ -10507,11 +10613,11 @@ do (function(SOLACE)
             render.drawSimpleText(22, 29, "SOLACE Render Error: " .. tostring(err), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
         end
 
-        -- Permission warning banner if cursor/input/calcview permissions were restricted
-        if not hasPermission("input.enablecursor") or not hasPermission("input") or not hasPermission("render.calcview") then
+        -- Permission warning banner if cursor/input/calcview/hologram permissions were restricted
+        if not hasPermission("input.enablecursor") or not hasPermission("input") or not hasPermission("render.calcview") or not hasPermission("hologram.create") then
             local rects = layout.rects
             local sw = ui.scrW or render.getResolution()
-            local msg = "SOLACE needs Cursor/Input/CalcView permissions: Press E (Use) on the Starfall chip to grant."
+            local msg = "SOLACE needs Cursor/Input/CalcView/Hologram permissions: Press E (Use) on the Starfall chip to grant."
             render.setFont(Theme.Fonts.BodyBold)
             local mw = render.getTextSize(msg) + 24
             local mx = math.floor((sw - mw) * 0.5)
