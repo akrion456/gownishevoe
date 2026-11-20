@@ -261,6 +261,27 @@ do (function(SOLACE)
                 timeline = true,
             },
 
+            -- Undocked floating panel flags (Dear ImGui windows)
+            floatingPanels = {
+                toolbox = false,
+                explorer = false,
+                properties = false,
+                timeline = false,
+            },
+
+            -- Floating Dear ImGui utility windows
+            windows = {
+                demo = false,
+                settings = false,
+                console = false,
+            },
+
+            -- Active Dear ImGui theme & style settings
+            uiTheme = "dark",
+            uiRounding = 4,
+            activePropertiesTab = "inspector",
+            activeTimelineTab = "tracks",
+
             -- Property section collapse state
             sections = {
                 selection = true,
@@ -336,7 +357,28 @@ do (function(SOLACE)
     function Events.new()
         return setmetatable({
             _listeners = {},
+            _log = {},
         }, Events)
+    end
+
+    function Events:log(level, msg)
+        local entry = {
+            time = timer and timer.realtime and timer.realtime() or 0,
+            level = level or "info",
+            text = tostring(msg or ""),
+        }
+        self._log[#self._log + 1] = entry
+        while #self._log > 120 do
+            table.remove(self._log, 1)
+        end
+    end
+
+    function Events:getLogs()
+        return self._log
+    end
+
+    function Events:clearLogs()
+        self._log = {}
     end
 
     function Events:on(eventName, id, fn)
@@ -356,6 +398,7 @@ do (function(SOLACE)
     end
 
     function Events:emit(eventName, ...)
+        self:log("info", "Event: " .. tostring(eventName))
         local bucket = self._listeners[eventName]
         if not bucket then return end
         for _, fn in pairs(bucket) do
@@ -1846,37 +1889,42 @@ do (function(SOLACE)
 
     -- Colors stored as {r, g, b, a} arrays so render.setRGBA can be called with zero allocations
     Theme.C = {
-        -- Surfaces (layered dark slate hierarchy)
+        -- Surfaces (layered Dear ImGui Dark Slate hierarchy)
         bgApp          = { 17, 19, 24, 248 },
-        bgPanel        = { 22, 25, 31, 245 },
+        bgPanel        = { 21, 24, 31, 246 },
         bgPanelAlt     = { 27, 30, 38, 255 },
-        bgHeader       = { 29, 33, 42, 255 },
+        bgHeader       = { 27, 32, 42, 255 },
+        bgTitleActive  = { 36, 58, 98, 255 },
         bgToolbar      = { 20, 23, 29, 250 },
         bgInput        = { 15, 17, 22, 255 },
-        bgControl      = { 36, 40, 50, 255 },
-        bgControlHover = { 46, 52, 65, 255 },
-        bgControlPress = { 30, 34, 43, 255 },
-        bgSelection    = { 43, 92, 176, 110 },
-        bgSelectionRow = { 38, 79, 148, 95 },
+        bgControl      = { 36, 41, 52, 255 },
+        bgControlHover = { 49, 58, 76, 255 },
+        bgControlPress = { 30, 35, 45, 255 },
+        bgSelection    = { 43, 92, 176, 120 },
+        bgSelectionRow = { 38, 79, 148, 105 },
         bgBadgePhase   = { 42, 46, 58, 220 },
+        bgTab          = { 28, 33, 44, 255 },
+        bgTabActive    = { 44, 72, 120, 255 },
+        bgTabHover     = { 52, 78, 126, 255 },
+        bgPopup        = { 18, 21, 28, 250 },
 
         -- Borders & dividers
-        border         = { 44, 49, 60, 255 },
-        borderLight    = { 62, 69, 84, 255 },
-        borderFocus    = { 66, 135, 245, 255 },
+        border         = { 46, 52, 66, 255 },
+        borderLight    = { 68, 76, 94, 255 },
+        borderFocus    = { 66, 150, 250, 255 },
         splitter       = { 32, 36, 45, 255 },
-        splitterHover  = { 66, 135, 245, 220 },
+        splitterHover  = { 66, 150, 250, 220 },
 
         -- Text hierarchy
-        textPrimary    = { 232, 236, 244, 255 },
-        textSecondary  = { 164, 172, 188, 255 },
-        textMuted      = { 108, 116, 132, 255 },
-        textDisabled   = { 80, 86, 100, 255 },
+        textPrimary    = { 234, 238, 246, 255 },
+        textSecondary  = { 166, 174, 190, 255 },
+        textMuted      = { 112, 120, 136, 255 },
+        textDisabled   = { 82, 88, 102, 255 },
 
         -- Brand & semantic accents
-        accent         = { 59, 130, 246, 255 },
-        accentSoft     = { 59, 130, 246, 42 },
-        accentBright   = { 96, 165, 250, 255 },
+        accent         = { 66, 150, 250, 255 },
+        accentSoft     = { 66, 150, 250, 48 },
+        accentBright   = { 102, 174, 255, 255 },
         success        = { 34, 197, 94, 255 },
         warning        = { 245, 158, 11, 255 },
         danger         = { 239, 68, 68, 255 },
@@ -1889,8 +1937,104 @@ do (function(SOLACE)
         -- Viewport grid & overlays
         gridMinor      = { 110, 122, 145, 55 },
         gridMajor      = { 150, 165, 195, 115 },
-        hudPill        = { 16, 18, 24, 215 },
-        tooltipBg      = { 14, 16, 21, 245 },
+        hudPill        = { 16, 18, 24, 220 },
+        tooltipBg      = { 14, 16, 22, 248 },
+    }
+
+    Theme.THEMES = {
+        dark = {
+            label = "ImGui Dark",
+            bgApp          = { 17, 19, 24, 248 },
+            bgPanel        = { 21, 24, 31, 246 },
+            bgPanelAlt     = { 27, 30, 38, 255 },
+            bgHeader       = { 27, 32, 42, 255 },
+            bgTitleActive  = { 36, 58, 98, 255 },
+            bgToolbar      = { 20, 23, 29, 250 },
+            bgInput        = { 15, 17, 22, 255 },
+            bgControl      = { 36, 41, 52, 255 },
+            bgControlHover = { 49, 58, 76, 255 },
+            bgControlPress = { 30, 35, 45, 255 },
+            bgSelection    = { 43, 92, 176, 120 },
+            bgSelectionRow = { 38, 79, 148, 105 },
+            bgBadgePhase   = { 42, 46, 58, 220 },
+            bgTab          = { 28, 33, 44, 255 },
+            bgTabActive    = { 44, 72, 120, 255 },
+            bgTabHover     = { 52, 78, 126, 255 },
+            bgPopup        = { 18, 21, 28, 250 },
+            border         = { 46, 52, 66, 255 },
+            borderLight    = { 68, 76, 94, 255 },
+            borderFocus    = { 66, 150, 250, 255 },
+            textPrimary    = { 234, 238, 246, 255 },
+            textSecondary  = { 166, 174, 190, 255 },
+            textMuted      = { 112, 120, 136, 255 },
+            accent         = { 66, 150, 250, 255 },
+            accentSoft     = { 66, 150, 250, 48 },
+            accentBright   = { 102, 174, 255, 255 },
+            hudPill        = { 16, 18, 24, 220 },
+            tooltipBg      = { 14, 16, 22, 248 },
+        },
+        classic = {
+            label = "ImGui Classic",
+            bgApp          = { 14, 14, 18, 246 },
+            bgPanel        = { 18, 18, 24, 242 },
+            bgPanelAlt     = { 26, 27, 36, 255 },
+            bgHeader       = { 46, 48, 74, 255 },
+            bgTitleActive  = { 68, 72, 138, 255 },
+            bgToolbar      = { 20, 21, 28, 248 },
+            bgInput        = { 22, 24, 34, 255 },
+            bgControl      = { 54, 58, 92, 255 },
+            bgControlHover = { 74, 80, 132, 255 },
+            bgControlPress = { 48, 52, 82, 255 },
+            bgSelection    = { 82, 92, 184, 130 },
+            bgSelectionRow = { 66, 74, 152, 110 },
+            bgBadgePhase   = { 54, 58, 92, 220 },
+            bgTab          = { 42, 46, 78, 255 },
+            bgTabActive    = { 72, 82, 148, 255 },
+            bgTabHover     = { 86, 98, 170, 255 },
+            bgPopup        = { 18, 18, 26, 250 },
+            border         = { 72, 74, 102, 255 },
+            borderLight    = { 98, 102, 138, 255 },
+            borderFocus    = { 110, 140, 255, 255 },
+            textPrimary    = { 236, 236, 244, 255 },
+            textSecondary  = { 182, 186, 204, 255 },
+            textMuted      = { 126, 130, 152, 255 },
+            accent         = { 110, 140, 255, 255 },
+            accentSoft     = { 110, 140, 255, 52 },
+            accentBright   = { 142, 168, 255, 255 },
+            hudPill        = { 18, 18, 26, 224 },
+            tooltipBg      = { 16, 16, 24, 248 },
+        },
+        light = {
+            label = "ImGui Light",
+            bgApp          = { 226, 230, 238, 248 },
+            bgPanel        = { 238, 241, 246, 248 },
+            bgPanelAlt     = { 228, 232, 240, 255 },
+            bgHeader       = { 214, 220, 232, 255 },
+            bgTitleActive  = { 176, 198, 232, 255 },
+            bgToolbar      = { 232, 236, 243, 250 },
+            bgInput        = { 250, 251, 254, 255 },
+            bgControl      = { 212, 218, 230, 255 },
+            bgControlHover = { 194, 206, 228, 255 },
+            bgControlPress = { 176, 192, 220, 255 },
+            bgSelection    = { 66, 132, 232, 90 },
+            bgSelectionRow = { 66, 132, 232, 70 },
+            bgBadgePhase   = { 202, 210, 226, 230 },
+            bgTab          = { 216, 222, 232, 255 },
+            bgTabActive    = { 186, 206, 240, 255 },
+            bgTabHover     = { 198, 214, 242, 255 },
+            bgPopup        = { 244, 246, 250, 252 },
+            border         = { 180, 188, 204, 255 },
+            borderLight    = { 148, 158, 178, 255 },
+            borderFocus    = { 48, 118, 230, 255 },
+            textPrimary    = { 22, 26, 36, 255 },
+            textSecondary  = { 64, 72, 90, 255 },
+            textMuted      = { 108, 116, 134, 255 },
+            accent         = { 48, 118, 230, 255 },
+            accentSoft     = { 48, 118, 230, 44 },
+            accentBright   = { 36, 102, 214, 255 },
+            hudPill        = { 238, 241, 246, 235 },
+            tooltipBg      = { 248, 249, 252, 252 },
+        },
     }
 
     Theme.Metrics = {
@@ -1900,8 +2044,80 @@ do (function(SOLACE)
         headerH = 26,
         rowH = 22,
         controlH = 22,
-        radius = 3,
+        radius = 4,
     }
+
+    Theme.Style = {
+        activeTheme = "dark",
+        windowRounding = 5,
+        frameRounding = 4,
+        tabRounding = 4,
+        grabRounding = 3,
+        scrollbarRounding = 4,
+        popupRounding = 4,
+        windowPadding = 8,
+        framePaddingX = 7,
+        framePaddingY = 4,
+        itemSpacingX = 6,
+        itemSpacingY = 5,
+        titleBarH = 24,
+    }
+
+    Theme._version = 1
+
+    function Theme.applyTheme(name, rounding)
+        local preset = Theme.THEMES[name] or Theme.THEMES.dark
+        Theme.Style.activeTheme = Theme.THEMES[name] and name or "dark"
+        for k, col in pairs(preset) do
+            if type(col) == "table" and Theme.C[k] then
+                local dst = Theme.C[k]
+                dst[1], dst[2], dst[3], dst[4] = col[1], col[2], col[3], col[4]
+            end
+        end
+        if type(rounding) == "number" then
+            local r = math.clamp(math.floor(rounding + 0.5), 0, 8)
+            Theme.Style.frameRounding = r
+            Theme.Style.windowRounding = math.min(8, r + 1)
+            Theme.Style.tabRounding = r
+            Theme.Style.popupRounding = r
+            Theme.Metrics.radius = r
+        end
+        Theme._version = Theme._version + 1
+    end
+
+    local hasRoundedBox = (type(render.drawRoundedBox) == "function")
+    local hasRoundedBoxEx = (type(render.drawRoundedBoxEx) == "function")
+    local hasFilledCircle = (type(render.drawFilledCircle) == "function")
+
+    function Theme.drawRoundedRect(r, x, y, w, h, c, alphaOverride)
+        if w <= 0 or h <= 0 then return end
+        if c then Theme.setColor(c, alphaOverride) end
+        if hasRoundedBox and r > 0 and w >= r * 2 and h >= r * 2 then
+            render.drawRoundedBox(r, x, y, w, h)
+        else
+            render.drawRectFast(x, y, w, h)
+        end
+    end
+
+    function Theme.drawRoundedRectEx(r, x, y, w, h, tl, tr, bl, br, c, alphaOverride)
+        if w <= 0 or h <= 0 then return end
+        if c then Theme.setColor(c, alphaOverride) end
+        if hasRoundedBoxEx and r > 0 and w >= r * 2 and h >= r * 2 then
+            render.drawRoundedBoxEx(r, x, y, w, h, tl, tr, bl, br)
+        else
+            render.drawRectFast(x, y, w, h)
+        end
+    end
+
+    function Theme.drawFilledCircle(cx, cy, radius, c, alphaOverride)
+        if c then Theme.setColor(c, alphaOverride) end
+        if hasFilledCircle then
+            render.drawFilledCircle(cx, cy, radius)
+        else
+            local s = math.max(2, math.floor(radius * 2))
+            render.drawRectFast(cx - radius, cy - radius, s, s)
+        end
+    end
 
     Theme.Fonts = {}
 
@@ -2048,6 +2264,38 @@ do (function(SOLACE)
         elseif name == "chevronRight" then
             render.drawLine(cx - 1, cy - 3, cx + 2, cy)
             render.drawLine(cx - 1, cy + 3, cx + 2, cy)
+        elseif name == "check" then
+            render.drawLine(x + 3, cy, cx - 1, y + size - 4)
+            render.drawLine(cx - 1, y + size - 4, x + size - 3, y + 3)
+        elseif name == "undock" then
+            render.drawRectOutline(x + 2, y + 5, size - 7, size - 7, 1)
+            render.drawLine(cx, cy, x + size - 2, y + 2)
+            render.drawLine(x + size - 5, y + 2, x + size - 2, y + 2)
+            render.drawLine(x + size - 2, y + 2, x + size - 2, y + 5)
+        elseif name == "dock" then
+            render.drawRectOutline(x + 2, y + 2, size - 4, size - 4, 1)
+            render.drawRectFast(x + 3, y + 3, 4, size - 6)
+        elseif name == "sliders" then
+            render.drawLine(x + 2, y + 4, x + size - 2, y + 4)
+            render.drawRectFast(x + 4, y + 2, 3, 5)
+            render.drawLine(x + 2, cy, x + size - 2, cy)
+            render.drawRectFast(x + size - 7, cy - 2, 3, 5)
+            render.drawLine(x + 2, y + size - 4, x + size - 2, y + size - 4)
+            render.drawRectFast(cx - 1, y + size - 6, 3, 5)
+        elseif name == "console" then
+            render.drawRectOutline(x + 2, y + 2, size - 4, size - 4, 1)
+            render.drawLine(x + 4, y + 5, cx - 1, cy)
+            render.drawLine(cx - 1, cy, x + 4, y + size - 5)
+            render.drawLine(cx + 1, y + size - 5, x + size - 4, y + size - 5)
+        elseif name == "info" then
+            render.drawCircle(cx, cy, r + 1)
+            render.drawRectFast(cx - 1, y + 4, 2, 2)
+            render.drawRectFast(cx - 1, cy - 1, 2, 4)
+        elseif name == "warning" then
+            render.drawLine(cx, y + 2, x + 2, y + size - 3)
+            render.drawLine(cx, y + 2, x + size - 2, y + size - 3)
+            render.drawLine(x + 2, y + size - 3, x + size - 2, y + size - 3)
+            render.drawRectFast(cx - 1, cy - 1, 2, 3)
         else
             render.drawRectOutline(x + 3, y + 3, size - 6, size - 6, 1)
         end
@@ -2210,6 +2458,26 @@ do (function(SOLACE)
 
         self.hotId = nil
         self._tooltipText = nil
+        self._currentWinId = nil
+        self._drawingPopup = false
+        self._topHoverWinId = nil
+        if SOLACE.ImGui and SOLACE.ImGui.updateFrameRouting then
+            SOLACE.ImGui.updateFrameRouting(self)
+        end
+    end
+
+    function UIManager:setWindowContext(winId, isPopup)
+        self._currentWinId = winId
+        self._drawingPopup = (isPopup == true)
+    end
+
+    function UIManager:canInteractCurrentWindow()
+        if self._drawingPopup then return true end
+        if self._topHoverWinId == "__popup__" then return false end
+        if self._topHoverWinId ~= nil and self._topHoverWinId ~= self._currentWinId then
+            return false
+        end
+        return true
     end
 
     function UIManager:beginAutoScroll(id, canH, canV)
@@ -2270,13 +2538,16 @@ do (function(SOLACE)
         if self.state.viewportLooking or self.autoScroll or self._autoScrollConsumed then
             return false, false
         end
+        local isActive = (self.activeId == id)
+        if not isActive and not self:canInteractCurrentWindow() then
+            return false, false
+        end
         local inside = self:pointInRect(x, y, w, h) and self:isMouseInClip()
-        local canHover = (self.activeId == nil or self.activeId == id)
+        local canHover = (self.activeId == nil or isActive)
         if inside and canHover then
             self.hotId = id
         end
         local isHot = (self.hotId == id)
-        local isActive = (self.activeId == id)
         return isHot, isActive
     end
 
@@ -2440,7 +2711,7 @@ do (function(SOLACE)
     local Widgets = {}
     local EMPTY_OPTS = {}
 
-    function Widgets.panelFrame(x, y, w, h, title, rightText)
+    function Widgets.panelFrame(x, y, w, h, title, rightText, opts)
         Theme.setColor(Theme.C.bgPanel)
         render.drawRectFast(x, y, w, h)
 
@@ -2458,10 +2729,28 @@ do (function(SOLACE)
         Theme.setColor(Theme.C.textPrimary)
         render.drawSimpleText(x + 10, y + hh * 0.5, title, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
 
+        local textRightX = x + w - 10
+        if opts and opts.onUndock and opts.ui then
+            local ux = x + w - 22
+            local uy = y + 4
+            local uHot, uCap = opts.ui:hitTest(opts.undockId or ("undock_" .. title), ux, uy, 18, hh - 8)
+            if uHot then
+                Theme.drawRoundedRect(3, ux, uy, 18, hh - 8, Theme.C.bgControlHover)
+                opts.ui:setTooltip("Undock into floating ImGui window")
+                if opts.ui.leftPressed then opts.ui:capture(opts.undockId or ("undock_" .. title)) end
+            end
+            if uCap and opts.ui.leftReleased and uHot then
+                opts.onUndock()
+            end
+            Theme.setColor(uHot and Theme.C.accentBright or Theme.C.textMuted)
+            Theme.drawIcon("undock", ux + 3, uy + 3, 12)
+            textRightX = ux - 6
+        end
+
         if rightText and rightText ~= "" then
             Theme.setFont(Theme.Fonts.Small)
             Theme.setColor(Theme.C.textMuted)
-            render.drawSimpleText(x + w - 10, y + hh * 0.5, rightText, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
+            render.drawSimpleText(textRightX, y + hh * 0.5, rightText, TEXT_ALIGN.RIGHT, TEXT_ALIGN.CENTER)
         end
 
         return x + 1, y + hh + 1, math.max(0, w - 2), math.max(0, h - hh - 2)
@@ -2485,7 +2774,7 @@ do (function(SOLACE)
             clicked = true
         end
 
-        -- Background
+        -- Background (Dear ImGui rounded box when rounding > 0)
         if disabled then
             Theme.setColor(Theme.C.bgPanelAlt, 180)
         elseif active then
@@ -2497,7 +2786,7 @@ do (function(SOLACE)
         else
             Theme.setColor(opts.subtle and Theme.C.bgPanelAlt or Theme.C.bgControl)
         end
-        render.drawRectFast(x, y, w, h)
+        Theme.drawRoundedRect(Theme.Style.frameRounding or 4, x, y, w, h)
 
         -- Border (skip outline on idle subtle/disabled buttons to minimize draw calls)
         if active then
@@ -2793,7 +3082,1488 @@ do (function(SOLACE)
 
     SOLACE.Widgets = Widgets
 
-    -- 13.4 Resizable Dock Layout & Splitters
+    -- 13.4 Dear ImGui-Inspired Immediate-Mode UI Framework (SOLACE.ImGui)
+
+    local ImGui = {
+        _windows = {},
+        _zOrder = {},          -- Ordered bottom-to-top window IDs
+        _focusedWinId = nil,
+        _winStack = {},
+        _childStack = {},
+        _idStack = {},
+        _itemWidthStack = {},
+        _tabBars = {},
+        _tabStack = {},
+        _collapsing = {},
+        _treeStack = {},
+        _activePopup = nil,    -- { id, ownerWinId, x, y, w, h, drawFn }
+        _activePopupRect = nil,
+        _comboPending = {},    -- { [id] = selectedValue }
+        _notifications = {},
+        _ui = nil,
+        _state = nil,
+        _dt = 0.016,
+        _frameCount = 0,
+        _pendingRepaint = false,
+    }
+
+    local function stripIdSuffix(label)
+        if not label then return "" end
+        local idx = string.find(label, "##", 1, true)
+        if idx then
+            return string.sub(label, 1, idx - 1)
+        end
+        return label
+    end
+
+    ImGui.displayLabel = stripIdSuffix
+
+    function ImGui.GetID(label)
+        local n = #ImGui._idStack
+        if n == 0 then
+            return tostring(label)
+        end
+        return table.concat(ImGui._idStack, "/") .. "/" .. tostring(label)
+    end
+
+    function ImGui.PushID(id)
+        ImGui._idStack[#ImGui._idStack + 1] = tostring(id)
+    end
+
+    function ImGui.PopID()
+        local n = #ImGui._idStack
+        if n > 0 then
+            ImGui._idStack[n] = nil
+        end
+    end
+
+    function ImGui.PushItemWidth(w)
+        ImGui._itemWidthStack[#ImGui._itemWidthStack + 1] = w
+    end
+
+    function ImGui.PopItemWidth()
+        local n = #ImGui._itemWidthStack
+        if n > 0 then
+            ImGui._itemWidthStack[n] = nil
+        end
+    end
+
+    local function getItemWidth(cur)
+        local n = #ImGui._itemWidthStack
+        if n > 0 and ImGui._itemWidthStack[n] then
+            return ImGui._itemWidthStack[n]
+        end
+        return math.max(40, cur.contentW - (cur.x - cur.contentX))
+    end
+
+    function ImGui.getWindow(id)
+        return ImGui._windows[id]
+    end
+
+    function ImGui.bringToFront(id)
+        local z = ImGui._zOrder
+        for i = 1, #z do
+            if z[i] == id then
+                table.remove(z, i)
+                break
+            end
+        end
+        z[#z + 1] = id
+        ImGui._focusedWinId = id
+    end
+
+    function ImGui.ensureWindow(id, title, opts)
+        opts = opts or {}
+        local win = ImGui._windows[id]
+        if not win then
+            local sw = (ImGui._ui and ImGui._ui.scrW) or 1920
+            local sh = (ImGui._ui and ImGui._ui.scrH) or 1080
+            local w = opts.w or 360
+            local h = opts.h or 420
+            local x = opts.x or math.floor((sw - w) * 0.5)
+            local y = opts.y or math.floor((sh - h) * 0.5)
+            win = {
+                id = id,
+                title = stripIdSuffix(title or id),
+                x = x,
+                y = y,
+                w = w,
+                h = h,
+                minW = opts.minW or 220,
+                minH = opts.minH or 140,
+                collapsed = opts.collapsed == true,
+                closable = opts.closable ~= false,
+                resizable = opts.resizable ~= false,
+                scrollY = 0,
+                contentH = 0,
+                viewH = h - 24,
+                visibleThisFrame = false,
+                dragging = false,
+                resizing = false,
+                dragOffX = 0,
+                dragOffY = 0,
+                resizeStartW = w,
+                resizeStartH = h,
+                resizeStartMx = 0,
+                resizeStartMy = 0,
+            }
+            ImGui._windows[id] = win
+            ImGui.bringToFront(id)
+        else
+            if title then
+                win.title = stripIdSuffix(title)
+            end
+            if opts.minW then win.minW = opts.minW end
+            if opts.minH then win.minH = opts.minH end
+            if opts.closable ~= nil then win.closable = opts.closable end
+            if opts.resizable ~= nil then win.resizable = opts.resizable end
+        end
+        return win
+    end
+
+    function ImGui.windowScreenRect(win)
+        local titleH = Theme.Style.titleBarH or 24
+        return win.x, win.y, win.w, win.collapsed and titleH or win.h
+    end
+
+    function ImGui.isPointOverAnyWindow(x, y)
+        local r = ImGui._activePopupRect
+        if r and x >= r[1] and x <= (r[1] + r[3]) and y >= r[2] and y <= (r[2] + r[4]) then
+            return true
+        end
+        local z = ImGui._zOrder
+        for i = #z, 1, -1 do
+            local win = ImGui._windows[z[i]]
+            if win and win.visibleThisFrame then
+                local wx, wy, ww, wh = ImGui.windowScreenRect(win)
+                if x >= wx and x <= (wx + ww) and y >= wy and y <= (wy + wh) then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    function ImGui.updateFrameRouting(ui)
+        ImGui._ui = ui
+        local mx, my = ui.mx, ui.my
+
+        -- Reset per-frame popup rectangle; active popup re-publishes it when drawn
+        local pr = ImGui._activePopupRect
+        if ImGui._activePopup and pr then
+            if mx >= pr[1] and mx <= (pr[1] + pr[3]) and my >= pr[2] and my <= (pr[2] + pr[4]) then
+                ui._topHoverWinId = "__popup__"
+                return
+            end
+            if ui.leftPressed or ui.rightPressed then
+                -- Close popup on click outside without clicking through to elements underneath
+                ImGui._activePopupCloseRequested = true
+                ui._topHoverWinId = "__popup__"
+                return
+            end
+        end
+
+        local z = ImGui._zOrder
+        for i = #z, 1, -1 do
+            local win = ImGui._windows[z[i]]
+            if win and win.visibleThisFrame then
+                local wx, wy, ww, wh = ImGui.windowScreenRect(win)
+                if mx >= wx and mx <= (wx + ww) and my >= wy and my <= (wy + wh) then
+                    ui._topHoverWinId = win.id
+                    if (ui.leftPressed or ui.rightPressed) and not ui.state.viewportLooking then
+                        ImGui.bringToFront(win.id)
+                    end
+                    return
+                end
+            end
+        end
+
+        ui._topHoverWinId = nil
+    end
+
+    function ImGui.beginFrame(ui, state, dt)
+        ImGui._ui = ui
+        ImGui._state = state
+        ImGui._dt = dt or 0.016
+        ImGui._frameCount = ImGui._frameCount + 1
+        ImGui._winStack = {}
+        ImGui._childStack = {}
+        ImGui._idStack = {}
+        ImGui._itemWidthStack = {}
+        ImGui._tabStack = {}
+        ImGui._treeStack = {}
+
+        if ImGui._activePopupCloseRequested then
+            ImGui._activePopup = nil
+            ImGui._activePopupRect = nil
+            ImGui._activePopupCloseRequested = false
+        end
+
+        -- Mark all windows hidden until Begin() runs for them this frame
+        for _, win in pairs(ImGui._windows) do
+            win.visibleThisFrame = false
+        end
+
+        -- Advance toast notifications
+        local notifs = ImGui._notifications
+        for i = #notifs, 1, -1 do
+            local n = notifs[i]
+            n.age = n.age + ImGui._dt
+            if n.age >= n.duration then
+                table.remove(notifs, i)
+            end
+        end
+    end
+
+    local function currentCursor()
+        local cn = #ImGui._childStack
+        if cn > 0 then
+            return ImGui._childStack[cn]
+        end
+        local wn = #ImGui._winStack
+        if wn > 0 then
+            return ImGui._winStack[wn]
+        end
+        return nil
+    end
+
+    local function advanceCursor(cur, itemW, itemH)
+        cur.prevX = cur.x
+        cur.prevY = cur.y
+        cur.prevW = itemW
+        cur.prevH = itemH
+        cur.lineMaxH = math.max(cur.lineMaxH or 0, itemH)
+        local spacingY = Theme.Style.itemSpacingY or 5
+        cur.x = cur.contentX + (cur.indent or 0)
+        cur.y = cur.y + cur.lineMaxH + spacingY
+        cur.lineMaxH = 0
+        cur.maxBottomY = math.max(cur.maxBottomY or cur.contentY, cur.y)
+    end
+
+    function ImGui.SameLine(offsetX, spacing)
+        local cur = currentCursor()
+        if not cur or not cur.prevY then return end
+        local sp = spacing or (Theme.Style.itemSpacingX or 6)
+        if offsetX and offsetX > 0 then
+            cur.x = cur.contentX + offsetX
+        else
+            cur.x = (cur.prevX or cur.contentX) + (cur.prevW or 0) + sp
+        end
+        cur.y = cur.prevY
+        cur.lineMaxH = cur.prevH or 0
+    end
+
+    function ImGui.Spacing(px)
+        local cur = currentCursor()
+        if not cur then return end
+        cur.y = cur.y + (px or (Theme.Style.itemSpacingY or 5))
+        cur.maxBottomY = math.max(cur.maxBottomY or cur.contentY, cur.y)
+    end
+
+    function ImGui.Dummy(w, h)
+        local cur = currentCursor()
+        if not cur then return end
+        advanceCursor(cur, w or 0, h or 0)
+    end
+
+    function ImGui.Indent(w)
+        local cur = currentCursor()
+        if not cur then return end
+        local d = w or 14
+        cur.indent = (cur.indent or 0) + d
+        cur.x = cur.contentX + cur.indent
+    end
+
+    function ImGui.Unindent(w)
+        local cur = currentCursor()
+        if not cur then return end
+        local d = w or 14
+        cur.indent = math.max(0, (cur.indent or 0) - d)
+        cur.x = cur.contentX + cur.indent
+    end
+
+    function ImGui.GetContentRegionAvail()
+        local cur = currentCursor()
+        if not cur then return 200, 200 end
+        return math.max(20, cur.contentW - (cur.x - cur.contentX)),
+               math.max(20, (cur.viewBottom or (cur.contentY + 200)) - cur.y)
+    end
+
+    function ImGui.GetCursorPos()
+        local cur = currentCursor()
+        if not cur then return 0, 0 end
+        return cur.x, cur.y
+    end
+
+    function ImGui.SetCursorPos(x, y)
+        local cur = currentCursor()
+        if not cur then return end
+        cur.x = cur.contentX + (x or 0)
+        cur.y = cur.contentY + (y or 0)
+    end
+
+    function ImGui.Separator()
+        local cur = currentCursor()
+        if not cur then return end
+        local w = cur.contentW
+        local y = math.floor(cur.y + 3)
+        Theme.setColor(Theme.C.border)
+        render.drawLine(cur.contentX, y, cur.contentX + w, y)
+        advanceCursor(cur, w, 7)
+    end
+
+    function ImGui.Begin(id, title, isOpen, opts)
+        if isOpen == false then return false, false end
+        opts = opts or {}
+        local ui = ImGui._ui
+        if not ui then return false, false end
+
+        local win = ImGui.ensureWindow(id, title, opts)
+        win.visibleThisFrame = true
+        win._dockCallback = opts.onDock
+
+        -- Clamp window inside screen bounds
+        local titleH = Theme.Style.titleBarH or 24
+        win.w = math.clamp(win.w, win.minW, math.max(win.minW, ui.scrW - 12))
+        win.h = math.clamp(win.h, win.minH, math.max(win.minH, ui.scrH - 12))
+        win.x = math.clamp(win.x, 4, math.max(4, ui.scrW - win.w - 4))
+        win.y = math.clamp(win.y, 4, math.max(4, ui.scrH - titleH - 4))
+
+        ui:setWindowContext(win.id, false)
+
+        local open = true
+        local focused = (ImGui._focusedWinId == win.id)
+        local winH = win.collapsed and titleH or win.h
+        local rWin = Theme.Style.windowRounding or 5
+
+        -- 1. Window body & titlebar background
+        if not win.collapsed then
+            -- Subtle drop shadow
+            Theme.drawRoundedRect(rWin + 1, win.x + 2, win.y + 3, win.w, winH, Theme.C.bgApp, 110)
+            Theme.drawRoundedRect(rWin, win.x, win.y, win.w, winH, Theme.C.bgPanel)
+        end
+
+        -- Titlebar background (top-rounded only when expanded)
+        local titleCol = focused and Theme.C.bgTitleActive or Theme.C.bgHeader
+        if win.collapsed then
+            Theme.drawRoundedRect(rWin, win.x, win.y, win.w, titleH, titleCol)
+        else
+            Theme.drawRoundedRectEx(rWin, win.x, win.y, win.w, titleH, true, true, false, false, titleCol)
+        end
+
+        -- Titlebar controls: collapse chevron (left), dock button (optional), close button (right)
+        local collapseHot, _ = ui:hitTest("imgui_col_" .. id, win.x + 4, win.y + 3, 18, titleH - 6)
+        if collapseHot and ui.leftPressed then
+            win.collapsed = not win.collapsed
+        end
+        Theme.setColor(collapseHot and Theme.C.textPrimary or Theme.C.textSecondary)
+        Theme.drawIcon(win.collapsed and "chevronRight" or "chevronDown", win.x + 6, win.y + 5, 13)
+
+        local rightPad = win.x + win.w - 6
+        if win.closable then
+            local closeX = rightPad - 16
+            local closeHot, _ = ui:hitTest("imgui_cls_" .. id, closeX, win.y + 3, 18, titleH - 6)
+            if closeHot then
+                Theme.drawRoundedRect(3, closeX, win.y + 4, 16, titleH - 8, Theme.C.danger, 175)
+                ui:setTooltip("Close window")
+                if ui.leftPressed then
+                    open = false
+                end
+            end
+            Theme.setColor(closeHot and Theme.C.textPrimary or Theme.C.textSecondary)
+            Theme.drawIcon("hide", closeX + 2, win.y + 5, 12)
+            rightPad = closeX - 4
+        end
+
+        if opts.onDock then
+            local dockX = rightPad - 18
+            local dockHot, _ = ui:hitTest("imgui_dock_" .. id, dockX, win.y + 3, 18, titleH - 6)
+            if dockHot then
+                Theme.drawRoundedRect(3, dockX, win.y + 4, 17, titleH - 8, Theme.C.bgControlHover)
+                ui:setTooltip("Dock back into Studio layout")
+                if ui.leftPressed then
+                    opts.onDock()
+                end
+            end
+            Theme.setColor(dockHot and Theme.C.accentBright or Theme.C.textSecondary)
+            Theme.drawIcon("dock", dockX + 2, win.y + 5, 12)
+            rightPad = dockX - 4
+        end
+
+        -- Titlebar drag region (between collapse button and right action buttons)
+        local dragW = math.max(20, rightPad - (win.x + 24))
+        local dragHot, dragCap = ui:hitTest("imgui_drag_" .. id, win.x + 24, win.y, dragW, titleH)
+        if dragHot and ui.leftPressed then
+            ui:capture("imgui_drag_" .. id)
+            win.dragging = true
+            win.dragOffX = ui.mx - win.x
+            win.dragOffY = ui.my - win.y
+            ImGui.bringToFront(win.id)
+        end
+        if dragCap and ui.leftDown and win.dragging then
+            win.x = math.clamp(math.floor(ui.mx - win.dragOffX), 4, math.max(4, ui.scrW - win.w - 4))
+            win.y = math.clamp(math.floor(ui.my - win.dragOffY), 4, math.max(4, ui.scrH - titleH - 4))
+        elseif not ui.leftDown then
+            win.dragging = false
+        end
+
+        -- Window title text
+        Theme.setFont(Theme.Fonts.BodyBold)
+        Theme.setColor(focused and Theme.C.textPrimary or Theme.C.textSecondary)
+        render.drawSimpleText(win.x + 26, win.y + titleH * 0.5, win.title, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        -- Outer window border
+        Theme.setColor(focused and Theme.C.borderLight or Theme.C.border)
+        render.drawRectOutline(win.x, win.y, win.w, winH, 1)
+
+        if win.collapsed then
+            win.visibleThisFrame = open
+            ui:setWindowContext(nil, false)
+            return false, open
+        end
+
+        -- Divider line below titlebar
+        Theme.setColor(Theme.C.border)
+        render.drawLine(win.x, win.y + titleH, win.x + win.w, win.y + titleH)
+
+        -- Resize grip hit-test (processed before children so grip takes priority at corner)
+        if win.resizable then
+            local gx, gy = win.x + win.w - 14, win.y + win.h - 14
+            local resHot, resCap = ui:hitTest("imgui_res_" .. id, gx, gy, 14, 14)
+            if resHot then
+                ui:setTooltip("Drag to resize")
+                if ui.leftPressed then
+                    ui:capture("imgui_res_" .. id)
+                    win.resizing = true
+                    win.resizeStartW = win.w
+                    win.resizeStartH = win.h
+                    win.resizeStartMx = ui.mx
+                    win.resizeStartMy = ui.my
+                    ImGui.bringToFront(win.id)
+                end
+            end
+            if resCap and ui.leftDown and win.resizing then
+                win.w = math.clamp(math.floor(win.resizeStartW + (ui.mx - win.resizeStartMx)), win.minW, ui.scrW - win.x - 4)
+                win.h = math.clamp(math.floor(win.resizeStartH + (ui.my - win.resizeStartMy)), win.minH, ui.scrH - win.y - 4)
+            elseif not ui.leftDown then
+                win.resizing = false
+            end
+        end
+
+        local pad = Theme.Style.windowPadding or 8
+        local viewY = win.y + titleH + 1
+        local viewH = math.max(20, win.h - titleH - 2)
+        win.viewH = viewH
+
+        -- Mouse wheel scrolling when pointer is over this window
+        if ui.wheelDelta ~= 0 and ui:canInteractCurrentWindow()
+            and ui:pointInRect(win.x, viewY, win.w, viewH) then
+            local maxScroll = math.max(0, (win.contentH or 0) - viewH)
+            if maxScroll > 0 then
+                win.scrollY = math.clamp(win.scrollY - ui.wheelDelta * 32, 0, maxScroll)
+            end
+        end
+
+        local needsScroll = (win.contentH or 0) > viewH
+        local sbSpace = needsScroll and 10 or 0
+        local contentX = win.x + pad
+        local contentW = math.max(40, win.w - pad * 2 - sbSpace)
+        local startY = viewY + pad - win.scrollY
+
+        ui:pushClip(win.x + 1, viewY, win.w - 2, viewH)
+
+        ImGui.PushID(win.id)
+        local ctx = {
+            win = win,
+            isChild = false,
+            viewX = win.x + 1,
+            viewY = viewY,
+            viewW = win.w - 2,
+            viewH = viewH,
+            viewBottom = viewY + viewH - pad,
+            contentX = contentX,
+            contentY = viewY + pad,
+            contentW = contentW,
+            x = contentX,
+            y = startY,
+            indent = 0,
+            maxBottomY = startY,
+            lineMaxH = 0,
+        }
+        ImGui._winStack[#ImGui._winStack + 1] = ctx
+
+        return true, open
+    end
+
+    function ImGui.End()
+        local wn = #ImGui._winStack
+        if wn == 0 then return end
+        local ctx = ImGui._winStack[wn]
+        ImGui._winStack[wn] = nil
+
+        local win = ctx.win
+        local ui = ImGui._ui
+        local pad = Theme.Style.windowPadding or 8
+        win.contentH = math.max(0, (ctx.maxBottomY - (ctx.viewY + pad - win.scrollY)) + pad * 2)
+        local maxScroll = math.max(0, win.contentH - ctx.viewH)
+        win.scrollY = math.clamp(win.scrollY, 0, maxScroll)
+
+        ui:popClip()
+
+        -- Draw vertical scrollbar if content overflows
+        if maxScroll > 0 then
+            local sbX = win.x + win.w - 8
+            local sbY = ctx.viewY + 4
+            local sbH = math.max(24, ctx.viewH - 18)
+            local newScroll = Widgets.scrollbar(ui, "imgui_sb_" .. win.id, sbX, sbY, 5, sbH, win.scrollY, win.contentH, ctx.viewH)
+            win.scrollY = newScroll
+        end
+
+        -- Draw Dear ImGui bottom-right resize triangle grip
+        if win.resizable then
+            local rx = win.x + win.w - 3
+            local ry = win.y + win.h - 3
+            local active = win.resizing or (ui.hotId == ("imgui_res_" .. win.id))
+            Theme.setColor(active and Theme.C.accentBright or Theme.C.borderLight)
+            render.drawLine(rx - 9, ry, rx, ry - 9)
+            render.drawLine(rx - 5, ry, rx, ry - 5)
+            render.drawLine(rx - 2, ry, rx, ry - 2)
+        end
+
+        ImGui.PopID()
+        ui:setWindowContext(nil, false)
+    end
+
+    function ImGui.BeginChild(id, w, h, border)
+        local parent = currentCursor()
+        if not parent then return false end
+        local ui = ImGui._ui
+        local fullId = ImGui.GetID(id)
+        ImGui._childMeta = ImGui._childMeta or {}
+        local meta = ImGui._childMeta[fullId]
+        if not meta then
+            meta = { scrollY = 0, contentH = 0 }
+            ImGui._childMeta[fullId] = meta
+        end
+
+        local cw = (w and w > 0) and w or math.max(40, parent.contentW - (parent.x - parent.contentX))
+        local ch = (h and h > 0) and h or math.max(60, (parent.viewBottom or (parent.y + 120)) - parent.y)
+        local cx, cy = parent.x, parent.y
+
+        if border ~= false then
+            Theme.drawRoundedRect(Theme.Style.frameRounding or 4, cx, cy, cw, ch, Theme.C.bgInput)
+            Theme.setColor(Theme.C.border)
+            render.drawRectOutline(cx, cy, cw, ch, 1)
+        end
+
+        if ui.wheelDelta ~= 0 and ui:canInteractCurrentWindow() and ui:pointInRect(cx, cy, cw, ch) then
+            local maxS = math.max(0, meta.contentH - ch)
+            if maxS > 0 then
+                meta.scrollY = math.clamp(meta.scrollY - ui.wheelDelta * 28, 0, maxS)
+            end
+        end
+
+        local pad = 6
+        local needsSb = meta.contentH > ch
+        ui:pushClip(cx + 1, cy + 1, cw - 2, ch - 2)
+        ImGui.PushID(id)
+
+        local cctx = {
+            meta = meta,
+            fullId = fullId,
+            parent = parent,
+            isChild = true,
+            boxX = cx,
+            boxY = cy,
+            boxW = cw,
+            boxH = ch,
+            viewH = ch,
+            viewBottom = cy + ch - pad,
+            contentX = cx + pad,
+            contentY = cy + pad,
+            contentW = math.max(24, cw - pad * 2 - (needsSb and 8 or 0)),
+            x = cx + pad,
+            y = cy + pad - meta.scrollY,
+            indent = 0,
+            maxBottomY = cy + pad - meta.scrollY,
+            lineMaxH = 0,
+        }
+        ImGui._childStack[#ImGui._childStack + 1] = cctx
+        return true
+    end
+
+    function ImGui.EndChild()
+        local cn = #ImGui._childStack
+        if cn == 0 then return end
+        local cctx = ImGui._childStack[cn]
+        ImGui._childStack[cn] = nil
+
+        local ui = ImGui._ui
+        local meta = cctx.meta
+        local pad = 6
+        meta.contentH = math.max(0, (cctx.maxBottomY - (cctx.boxY + pad - meta.scrollY)) + pad * 2)
+        local maxS = math.max(0, meta.contentH - cctx.boxH)
+        meta.scrollY = math.clamp(meta.scrollY, 0, maxS)
+
+        ui:popClip()
+
+        if maxS > 0 then
+            local sbX = cctx.boxX + cctx.boxW - 7
+            local sbY = cctx.boxY + 3
+            local sbH = math.max(20, cctx.boxH - 6)
+            meta.scrollY = Widgets.scrollbar(ui, cctx.fullId .. "_sb", sbX, sbY, 4, sbH, meta.scrollY, meta.contentH, cctx.boxH)
+        end
+
+        ImGui.PopID()
+        advanceCursor(cctx.parent, cctx.boxW, cctx.boxH)
+    end
+
+    -- Text widgets
+    function ImGui.Text(text, color)
+        local cur = currentCursor()
+        if not cur then return end
+        Theme.setFont(Theme.Fonts.Body)
+        Theme.setColor(color or Theme.C.textPrimary)
+        local tw, th = render.getTextSize(tostring(text or ""))
+        render.drawSimpleText(cur.x, cur.y, tostring(text or ""), TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+        advanceCursor(cur, tw or 60, math.max(16, th or 16))
+    end
+
+    function ImGui.TextColored(color, text)
+        ImGui.Text(text, color)
+    end
+
+    function ImGui.TextDisabled(text)
+        ImGui.Text(text, Theme.C.textMuted)
+    end
+
+    function ImGui.BulletText(text)
+        local cur = currentCursor()
+        if not cur then return end
+        Theme.drawFilledCircle(cur.x + 4, cur.y + 8, 2.5, Theme.C.accentBright)
+        Theme.setFont(Theme.Fonts.Body)
+        Theme.setColor(Theme.C.textPrimary)
+        local tw, th = render.getTextSize(tostring(text or ""))
+        render.drawSimpleText(cur.x + 12, cur.y, tostring(text or ""), TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+        advanceCursor(cur, (tw or 60) + 12, math.max(16, th or 16))
+    end
+
+    function ImGui.TextWrapped(text, color)
+        local cur = currentCursor()
+        if not cur then return end
+        local availW = math.max(60, cur.contentW - (cur.x - cur.contentX))
+        Theme.setFont(Theme.Fonts.Body)
+        local words = string.split(tostring(text or ""), " ")
+        local lines = {}
+        local line = ""
+        for i = 1, #words do
+            local candidate = (line == "") and words[i] or (line .. " " .. words[i])
+            local cw = render.getTextSize(candidate)
+            if (cw or 0) > availW and line ~= "" then
+                lines[#lines + 1] = line
+                line = words[i]
+            else
+                line = candidate
+            end
+        end
+        if line ~= "" then lines[#lines + 1] = line end
+        if #lines == 0 then lines[1] = "" end
+
+        Theme.setColor(color or Theme.C.textSecondary)
+        local lineH = 16
+        for i = 1, #lines do
+            render.drawSimpleText(cur.x, cur.y + (i - 1) * lineH, lines[i], TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+        end
+        advanceCursor(cur, availW, #lines * lineH)
+    end
+
+    function ImGui.Button(label, w, h, opts)
+        local cur = currentCursor()
+        if not cur then return false end
+        opts = opts or {}
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        Theme.setFont(Theme.Fonts.Body)
+        local tw = render.getTextSize(disp) or 40
+        local bw = (w and w > 0) and w or (tw + (Theme.Style.framePaddingX or 7) * 2 + (opts.icon and 18 or 0))
+        local bh = (h and h > 0) and h or 22
+        local wid = ImGui.GetID("btn_" .. label)
+        local clicked = Widgets.button(ui, wid, cur.x, cur.y, bw, bh, disp, opts)
+        advanceCursor(cur, bw, bh)
+        return clicked
+    end
+
+    function ImGui.SmallButton(label, opts)
+        local cur = currentCursor()
+        if not cur then return false end
+        local disp = stripIdSuffix(label)
+        Theme.setFont(Theme.Fonts.Small)
+        local tw = render.getTextSize(disp) or 30
+        return ImGui.Button(label, tw + 12, 18, opts)
+    end
+
+    function ImGui.Selectable(label, selected, w, h)
+        local cur = currentCursor()
+        if not cur then return false end
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        local sw = (w and w > 0) and w or math.max(40, cur.contentW - (cur.x - cur.contentX))
+        local sh = (h and h > 0) and h or 20
+        local wid = ImGui.GetID("sel_" .. label)
+
+        local hot, cap = ui:hitTest(wid, cur.x, cur.y, sw, sh)
+        if hot and ui.leftPressed then ui:capture(wid) end
+        local clicked = cap and ui.leftReleased and hot
+
+        if selected then
+            Theme.drawRoundedRect(3, cur.x, cur.y, sw, sh, Theme.C.bgSelectionRow)
+            Theme.setColor(Theme.C.accentBright)
+            render.drawRectFast(cur.x, cur.y + 3, 2, sh - 6)
+        elseif hot then
+            Theme.drawRoundedRect(3, cur.x, cur.y, sw, sh, Theme.C.bgControlHover, 140)
+        end
+
+        Theme.setFont(selected and Theme.Fonts.BodyBold or Theme.Fonts.Body)
+        Theme.setColor(selected and Theme.C.textPrimary or Theme.C.textSecondary)
+        render.drawSimpleText(cur.x + 8, cur.y + sh * 0.5, disp, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        advanceCursor(cur, sw, sh)
+        return clicked
+    end
+
+    function ImGui.RadioButton(label, active)
+        local cur = currentCursor()
+        if not cur then return false end
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        Theme.setFont(Theme.Fonts.Body)
+        local tw = render.getTextSize(disp) or 30
+        local rw = 22 + tw + 4
+        local rh = 20
+        local wid = ImGui.GetID("rad_" .. label)
+
+        local hot, cap = ui:hitTest(wid, cur.x, cur.y, rw, rh)
+        if hot and ui.leftPressed then ui:capture(wid) end
+        local clicked = cap and ui.leftReleased and hot
+
+        local cx, cy = cur.x + 9, cur.y + rh * 0.5
+        Theme.drawFilledCircle(cx, cy, 7, hot and Theme.C.bgControlHover or Theme.C.bgInput)
+        Theme.setColor((active or hot) and Theme.C.accent or Theme.C.borderLight)
+        render.drawCircle(cx, cy, 7)
+        if active then
+            Theme.drawFilledCircle(cx, cy, 4, Theme.C.accentBright)
+        end
+
+        Theme.setFont(Theme.Fonts.Body)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(cur.x + 22, cy, disp, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        advanceCursor(cur, rw, rh)
+        return clicked
+    end
+
+    function ImGui.Checkbox(label, checked)
+        local cur = currentCursor()
+        if not cur then return checked, false end
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        Theme.setFont(Theme.Fonts.Body)
+        local tw = render.getTextSize(disp) or 40
+        local boxSize = 16
+        local rowH = 20
+        local totalW = boxSize + 7 + tw + 4
+        local wid = ImGui.GetID("chk_" .. label)
+
+        local hot, cap = ui:hitTest(wid, cur.x, cur.y, totalW, rowH)
+        if hot and ui.leftPressed then ui:capture(wid) end
+        local clicked = cap and ui.leftReleased and hot
+        local nextVal = checked == true
+        if clicked then nextVal = not nextVal end
+
+        local bx, by = cur.x, cur.y + 2
+        local r = math.min(4, Theme.Style.frameRounding or 4)
+        local bgCol = nextVal and Theme.C.accentSoft or (hot and Theme.C.bgControlHover or Theme.C.bgInput)
+        Theme.drawRoundedRect(r, bx, by, boxSize, boxSize, bgCol)
+        Theme.setColor(nextVal and Theme.C.accentBright or (hot and Theme.C.borderFocus or Theme.C.borderLight))
+        render.drawRectOutline(bx, by, boxSize, boxSize, 1)
+
+        if nextVal then
+            Theme.setColor(Theme.C.accentBright)
+            Theme.drawIcon("check", bx + 2, by + 2, 12)
+        end
+
+        Theme.setFont(Theme.Fonts.Body)
+        Theme.setColor(hot and Theme.C.textPrimary or Theme.C.textSecondary)
+        render.drawSimpleText(bx + boxSize + 7, cur.y + rowH * 0.5, disp, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        advanceCursor(cur, totalW, rowH)
+        return nextVal, clicked
+    end
+
+    function ImGui.SliderFloat(label, val, minV, maxV, fmt, w)
+        local cur = currentCursor()
+        if not cur then return val, false end
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        local totalW = (w and w > 0) and w or getItemWidth(cur)
+        local rowH = 22
+        local wid = ImGui.GetID("sldr_" .. label)
+
+        -- Compact label-left / slider-right ImGui-style row when label is non-empty
+        local labelW = (disp ~= "") and math.min(math.floor(totalW * 0.42), 130) or 0
+        local trackX = cur.x + labelW
+        local trackW = math.max(50, totalW - labelW)
+
+        if disp ~= "" then
+            Theme.setFont(Theme.Fonts.Body)
+            Theme.setColor(Theme.C.textSecondary)
+            render.drawSimpleText(cur.x, cur.y + rowH * 0.5, disp, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+        end
+
+        local hot, cap = ui:hitTest(wid, trackX, cur.y, trackW, rowH)
+        if hot and ui.leftPressed then
+            ui:capture(wid)
+        end
+
+        local newV = tonumber(val) or minV
+        local changed = false
+        if cap and ui.leftDown then
+            local frac = math.clamp((ui.mx - trackX) / math.max(1, trackW), 0, 1)
+            local raw = math.clamp(minV + (maxV - minV) * frac, minV, maxV)
+            if math.abs(raw - newV) > 1e-6 then
+                newV = raw
+                changed = true
+            end
+        end
+
+        local r = Theme.Style.frameRounding or 4
+        Theme.drawRoundedRect(r, trackX, cur.y, trackW, rowH, Theme.C.bgInput)
+        local frac = math.clamp((newV - minV) / math.max(1e-6, maxV - minV), 0, 1)
+        local fillW = math.floor((trackW - 2) * frac)
+        if fillW > 2 then
+            Theme.drawRoundedRect(math.max(1, r - 1), trackX + 1, cur.y + 1, fillW, rowH - 2,
+                cap and Theme.C.accent or (hot and Theme.C.bgSelection or Theme.C.accentSoft), cap and 160 or 190)
+        end
+        if hot or cap then
+            Theme.setColor(Theme.C.borderFocus)
+            render.drawRectOutline(trackX, cur.y, trackW, rowH, 1)
+        else
+            Theme.setColor(Theme.C.border)
+            render.drawRectOutline(trackX, cur.y, trackW, rowH, 1)
+        end
+
+        Theme.setFont(Theme.Fonts.Mono)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(trackX + trackW * 0.5, cur.y + rowH * 0.5, string.format(fmt or "%.2f", newV), TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+
+        advanceCursor(cur, totalW, rowH)
+        return newV, changed
+    end
+
+    function ImGui.SliderInt(label, val, minV, maxV, fmt, w)
+        local nv, ch = ImGui.SliderFloat(label, math.floor((val or 0) + 0.5), minV, maxV, fmt or "%.0f", w)
+        nv = math.floor(nv + 0.5)
+        return nv, (ch or nv ~= val)
+    end
+
+    function ImGui.DragFloat(label, val, speed, minV, maxV, fmt, w)
+        local cur = currentCursor()
+        if not cur then return val, false end
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        local totalW = (w and w > 0) and w or getItemWidth(cur)
+        local rowH = 22
+        local wid = ImGui.GetID("dragf_" .. label)
+
+        local labelW = (disp ~= "") and math.min(math.floor(totalW * 0.42), 130) or 0
+        local boxX = cur.x + labelW
+        local boxW = math.max(48, totalW - labelW)
+
+        if disp ~= "" then
+            Theme.setFont(Theme.Fonts.Body)
+            Theme.setColor(Theme.C.textSecondary)
+            render.drawSimpleText(cur.x, cur.y + rowH * 0.5, disp, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+        end
+
+        local hot, cap = ui:hitTest(wid, boxX, cur.y, boxW, rowH)
+        if hot then
+            ui:setTooltip("Drag left/right to scrub value")
+            if ui.leftPressed then ui:capture(wid) end
+        end
+
+        local out = tonumber(val) or 0
+        local changed = false
+        if cap and ui.leftDown and ui.dx ~= 0 then
+            local sp = speed or 0.1
+            out = out + ui.dx * sp
+            if minV and maxV then out = math.clamp(out, minV, maxV) end
+            changed = (out ~= val)
+        end
+
+        Theme.drawRoundedRect(Theme.Style.frameRounding or 4, boxX, cur.y, boxW, rowH,
+            cap and Theme.C.bgControlPress or (hot and Theme.C.bgControlHover or Theme.C.bgInput))
+        Theme.setColor(cap and Theme.C.borderFocus or (hot and Theme.C.borderLight or Theme.C.border))
+        render.drawRectOutline(boxX, cur.y, boxW, rowH, 1)
+
+        Theme.setFont(Theme.Fonts.Mono)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(boxX + boxW * 0.5, cur.y + rowH * 0.5, string.format(fmt or "%.2f", out), TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+
+        advanceCursor(cur, totalW, rowH)
+        return out, changed
+    end
+
+    local AXIS_COLS = nil
+
+    function ImGui.DragFloat3(label, x, y, z, speed, fmt)
+        local cur = currentCursor()
+        if not cur then return x, y, z, false end
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        local totalW = getItemWidth(cur)
+        local rowH = 22
+        if disp ~= "" then
+            Theme.setFont(Theme.Fonts.Small)
+            Theme.setColor(Theme.C.textSecondary)
+            render.drawSimpleText(cur.x, cur.y, disp, TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            advanceCursor(cur, totalW, 15)
+        end
+
+        if not AXIS_COLS then
+            AXIS_COLS = { Theme.C.axisX, Theme.C.axisY, Theme.C.axisZ }
+        end
+
+        local vals = { tonumber(x) or 0, tonumber(y) or 0, tonumber(z) or 0 }
+        local changed = false
+        local gap = 4
+        local colW = math.max(36, math.floor((totalW - gap * 2) / 3))
+        local sp = speed or 0.2
+        local fstr = fmt or "%.2f"
+        local baseId = ImGui.GetID("df3_" .. label)
+
+        for i = 1, 3 do
+            local cx = cur.x + (i - 1) * (colW + gap)
+            local wid = baseId .. "_" .. i
+            local hot, cap = ui:hitTest(wid, cx, cur.y, colW, rowH)
+            if hot then
+                ui:setTooltip("Drag left/right to adjust axis")
+                if ui.leftPressed then ui:capture(wid) end
+            end
+            if cap and ui.leftDown and ui.dx ~= 0 then
+                vals[i] = vals[i] + ui.dx * sp
+                changed = true
+            end
+
+            Theme.drawRoundedRect(Theme.Style.frameRounding or 4, cx, cur.y, colW, rowH,
+                cap and Theme.C.bgControlPress or (hot and Theme.C.bgControlHover or Theme.C.bgInput))
+            Theme.setColor(AXIS_COLS[i])
+            render.drawRectFast(cx + 1, cur.y + 2, 3, rowH - 4)
+            Theme.setColor(cap and Theme.C.borderFocus or (hot and Theme.C.borderLight or Theme.C.border))
+            render.drawRectOutline(cx, cur.y, colW, rowH, 1)
+
+            Theme.setFont(Theme.Fonts.Mono)
+            Theme.setColor(Theme.C.textPrimary)
+            render.drawSimpleText(cx + colW * 0.5 + 2, cur.y + rowH * 0.5, string.format(fstr, vals[i]), TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+        end
+
+        advanceCursor(cur, totalW, rowH)
+        return vals[1], vals[2], vals[3], changed
+    end
+
+    -- TabBar (Dear ImGui style)
+    function ImGui.BeginTabBar(id)
+        local cur = currentCursor()
+        if not cur then return false end
+        local fullId = ImGui.GetID("tabs_" .. id)
+        local tb = ImGui._tabBars[fullId]
+        if not tb then
+            tb = { activeTab = nil }
+            ImGui._tabBars[fullId] = tb
+        end
+
+        local ctx = {
+            id = fullId,
+            tb = tb,
+            cur = cur,
+            x = cur.x,
+            y = cur.y,
+            tabH = 22,
+            startX = cur.x,
+            bottomY = cur.y + 23,
+            drawnAny = false,
+        }
+        -- Reserve tab header strip + underline BEFORE tab item contents draw
+        Theme.setColor(Theme.C.border)
+        render.drawLine(cur.contentX, cur.y + ctx.tabH, cur.contentX + cur.contentW, cur.y + ctx.tabH)
+        advanceCursor(cur, cur.contentW, ctx.tabH + 4)
+
+        ImGui._tabStack[#ImGui._tabStack + 1] = ctx
+        return true
+    end
+
+    function ImGui.BeginTabItem(label, selectedOverride)
+        local tn = #ImGui._tabStack
+        if tn == 0 then return false end
+        local ctx = ImGui._tabStack[tn]
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        local tabId = ctx.id .. "/" .. label
+
+        if not ctx.tb.activeTab then
+            ctx.tb.activeTab = label
+        end
+        if selectedOverride == true then
+            ctx.tb.activeTab = label
+        end
+
+        Theme.setFont(Theme.Fonts.Body)
+        local tw = render.getTextSize(disp) or 44
+        local tabW = tw + 20
+        local tabH = ctx.tabH
+        local isSelected = (ctx.tb.activeTab == label)
+
+        local hot, cap = ui:hitTest("tab_" .. tabId, ctx.x, ctx.y, tabW, tabH)
+        if hot and ui.leftPressed then ui:capture("tab_" .. tabId) end
+        if cap and ui.leftReleased and hot then
+            ctx.tb.activeTab = label
+            isSelected = true
+        end
+
+        local bgCol = isSelected and Theme.C.bgTabActive or (hot and Theme.C.bgTabHover or Theme.C.bgTab)
+        Theme.drawRoundedRectEx(Theme.Style.tabRounding or 4, ctx.x, ctx.y, tabW, tabH, true, true, false, false, bgCol)
+        if isSelected then
+            Theme.setColor(Theme.C.accentBright)
+            render.drawRectFast(ctx.x + 2, ctx.y + tabH - 2, tabW - 4, 2)
+        end
+
+        Theme.setFont(isSelected and Theme.Fonts.BodyBold or Theme.Fonts.Body)
+        Theme.setColor(isSelected and Theme.C.textPrimary or Theme.C.textSecondary)
+        render.drawSimpleText(ctx.x + tabW * 0.5, ctx.y + tabH * 0.5, disp, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+
+        ctx.x = ctx.x + tabW + 3
+        ctx.drawnAny = true
+        return isSelected
+    end
+
+    function ImGui.EndTabItem()
+        -- Semantic symmetry with Dear ImGui
+    end
+
+    function ImGui.EndTabBar()
+        local tn = #ImGui._tabStack
+        if tn == 0 then return end
+        ImGui._tabStack[tn] = nil
+    end
+
+    function ImGui.getTabBarActive(id)
+        local fullId = ImGui.GetID("tabs_" .. id)
+        local tb = ImGui._tabBars[fullId]
+        return tb and tb.activeTab or nil
+    end
+
+    function ImGui.setTabBarActive(id, label)
+        local fullId = ImGui.GetID("tabs_" .. id)
+        ImGui._tabBars[fullId] = ImGui._tabBars[fullId] or {}
+        ImGui._tabBars[fullId].activeTab = label
+    end
+
+    -- Dropdown / Combo (deferred top-most popup overlay!)
+    function ImGui.Combo(label, currentIdx, items, maxShow, w)
+        local cur = currentCursor()
+        if not cur then return currentIdx, false end
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        local totalW = (w and w > 0) and w or getItemWidth(cur)
+        local rowH = 22
+        local wid = ImGui.GetID("cmb_" .. label)
+
+        local labelW = (disp ~= "") and math.min(math.floor(totalW * 0.42), 130) or 0
+        local boxX = cur.x + labelW
+        local boxW = math.max(60, totalW - labelW)
+
+        if disp ~= "" then
+            Theme.setFont(Theme.Fonts.Body)
+            Theme.setColor(Theme.C.textSecondary)
+            render.drawSimpleText(cur.x, cur.y + rowH * 0.5, disp, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+        end
+
+        local pending = ImGui._comboPending[wid]
+        local outIdx = currentIdx
+        local changed = false
+        if pending ~= nil then
+            ImGui._comboPending[wid] = nil
+            if pending ~= currentIdx then
+                outIdx = pending
+                changed = true
+            end
+        end
+
+        local isOpen = (ImGui._activePopup and ImGui._activePopup.id == wid)
+        local hot, cap = ui:hitTest(wid, boxX, cur.y, boxW, rowH)
+        if hot and ui.leftPressed then
+            ui:capture(wid)
+        end
+        if cap and ui.leftReleased and hot then
+            if isOpen then
+                ImGui._activePopup = nil
+                ImGui._activePopupRect = nil
+            else
+                local visCount = math.min(#items, maxShow or 8)
+                local popH = visCount * 22 + 8
+                local offX = ui._rtOffsetX or 0
+                local offY = ui._rtOffsetY or 0
+                local popX = boxX + offX
+                local popY = cur.y + offY + rowH + 2
+                if popY + popH > (ui.scrH - 8) and (cur.y + offY - popH - 2) >= 8 then
+                    popY = cur.y + offY - popH - 2
+                end
+                ImGui._activePopup = {
+                    id = wid,
+                    x = popX,
+                    y = popY,
+                    w = math.max(boxW, 130),
+                    h = popH,
+                    items = items,
+                    selectedIdx = outIdx,
+                    scroll = 0,
+                    maxShow = maxShow or 8,
+                    onPick = function(idx)
+                        ImGui._comboPending[wid] = idx
+                    end,
+                }
+                ImGui._activePopupCloseRequested = false
+            end
+        end
+
+        Theme.drawRoundedRect(Theme.Style.frameRounding or 4, boxX, cur.y, boxW, rowH,
+            (isOpen or hot) and Theme.C.bgControlHover or Theme.C.bgControl)
+        Theme.setColor((isOpen or hot) and Theme.C.borderFocus or Theme.C.borderLight)
+        render.drawRectOutline(boxX, cur.y, boxW, rowH, 1)
+
+        local preview = tostring(items[outIdx] or "")
+        Theme.setFont(Theme.Fonts.Body)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(boxX + 8, cur.y + rowH * 0.5, preview, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        -- Right arrow button strip
+        local arrW = 20
+        Theme.setColor(isOpen and Theme.C.accent or Theme.C.bgPanelAlt)
+        Theme.drawRoundedRectEx(Theme.Style.frameRounding or 4, boxX + boxW - arrW, cur.y + 1, arrW - 1, rowH - 2, false, true, false, true)
+        Theme.setColor(Theme.C.textPrimary)
+        Theme.drawIcon("chevronDown", boxX + boxW - 16, cur.y + 5, 12)
+
+        advanceCursor(cur, totalW, rowH)
+        return outIdx, changed
+    end
+
+    function ImGui.DrawPopups(ui)
+        local p = ImGui._activePopup
+        if not p then
+            ImGui._activePopupRect = nil
+            return
+        end
+
+        local items = p.items or {}
+        local itemH = 22
+        local vis = math.min(#items, p.maxShow or 8)
+        local popH = vis * itemH + 8
+        local px = math.clamp(p.x, 4, math.max(4, ui.scrW - p.w - 4))
+        local py = math.clamp(p.y, 4, math.max(4, ui.scrH - popH - 4))
+        p.x, p.y, p.h = px, py, popH
+        ImGui._activePopupRect = { px, py, p.w, popH }
+
+        ui:setWindowContext("__popup__", true)
+
+        if #items > vis and ui.wheelDelta ~= 0 and ui:pointInRect(px, py, p.w, popH) then
+            p.scroll = math.clamp((p.scroll or 0) - math.floor(ui.wheelDelta), 0, #items - vis)
+        end
+
+        -- Drop shadow + popup surface
+        Theme.drawRoundedRect(Theme.Style.popupRounding or 4, px + 2, py + 3, p.w, popH, Theme.C.bgApp, 150)
+        Theme.drawRoundedRect(Theme.Style.popupRounding or 4, px, py, p.w, popH, Theme.C.bgPopup)
+        Theme.setColor(Theme.C.borderFocus)
+        render.drawRectOutline(px, py, p.w, popH, 1)
+
+        local startIdx = (p.scroll or 0) + 1
+        local endIdx = math.min(#items, startIdx + vis - 1)
+        for i = startIdx, endIdx do
+            local rowIdx = i - startIdx
+            local iy = py + 4 + rowIdx * itemH
+            local isSel = (i == p.selectedIdx)
+            local hot, cap = ui:hitTest(p.id .. "_opt_" .. i, px + 4, iy, p.w - 8, itemH)
+            if hot and ui.leftPressed then
+                ui:capture(p.id .. "_opt_" .. i)
+            end
+            if cap and ui.leftReleased and hot then
+                if p.onPick then p.onPick(i) end
+                ImGui._activePopup = nil
+                ImGui._activePopupRect = nil
+                ImGui._activePopupCloseRequested = false
+                ui:setWindowContext(nil, false)
+                return
+            end
+
+            if isSel then
+                Theme.drawRoundedRect(3, px + 4, iy, p.w - 8, itemH, Theme.C.bgSelectionRow)
+            elseif hot then
+                Theme.drawRoundedRect(3, px + 4, iy, p.w - 8, itemH, Theme.C.bgControlHover)
+            end
+
+            Theme.setFont(isSel and Theme.Fonts.BodyBold or Theme.Fonts.Body)
+            Theme.setColor(isSel and Theme.C.textPrimary or Theme.C.textSecondary)
+            render.drawSimpleText(px + 10, iy + itemH * 0.5, tostring(items[i]), TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+        end
+
+        ui:setWindowContext(nil, false)
+    end
+
+    function ImGui.InputText(label, value, placeholder, w)
+        local cur = currentCursor()
+        if not cur then return value, false, false end
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        local totalW = (w and w > 0) and w or getItemWidth(cur)
+        local rowH = 22
+        local wid = ImGui.GetID("inp_" .. label)
+
+        ImGui._inputValues = ImGui._inputValues or {}
+        ImGui._inputPending = ImGui._inputPending or {}
+        local pending = ImGui._inputPending[wid]
+        local curText = (pending ~= nil) and pending or tostring(value or "")
+        ImGui._inputPending[wid] = nil
+        ImGui._inputValues[wid] = curText
+
+        local labelW = (disp ~= "") and math.min(math.floor(totalW * 0.42), 130) or 0
+        local boxX = cur.x + labelW
+        local boxW = math.max(60, totalW - labelW)
+
+        if disp ~= "" then
+            Theme.setFont(Theme.Fonts.Body)
+            Theme.setColor(Theme.C.textSecondary)
+            render.drawSimpleText(cur.x, cur.y + rowH * 0.5, disp, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+        end
+
+        local clearedNow = false
+        Widgets.textBox(
+            ui,
+            wid,
+            boxX,
+            cur.y,
+            boxW,
+            rowH,
+            function() return ImGui._inputValues[wid] end,
+            function(v)
+                ImGui._inputValues[wid] = v
+                ImGui._inputPending[wid] = v
+                clearedNow = true
+            end,
+            placeholder
+        )
+
+        local newVal = ImGui._inputValues[wid]
+        if clearedNow then
+            ImGui._inputPending[wid] = nil
+        end
+        local changed = (pending ~= nil) or clearedNow
+        advanceCursor(cur, totalW, rowH)
+        return newVal, changed, false
+    end
+
+    function ImGui.CollapsingHeader(label, defaultOpen)
+        local cur = currentCursor()
+        if not cur then return false end
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        local wid = ImGui.GetID("colhdr_" .. label)
+        if ImGui._collapsing[wid] == nil then
+            ImGui._collapsing[wid] = (defaultOpen ~= false)
+        end
+        local isOpen = ImGui._collapsing[wid]
+        local w = cur.contentW
+        local h = 22
+
+        local hot, cap = ui:hitTest(wid, cur.x, cur.y, w, h)
+        if hot and ui.leftPressed then ui:capture(wid) end
+        if cap and ui.leftReleased and hot then
+            isOpen = not isOpen
+            ImGui._collapsing[wid] = isOpen
+        end
+
+        Theme.drawRoundedRect(3, cur.x, cur.y, w, h, hot and Theme.C.bgControlHover or Theme.C.bgHeader)
+        Theme.setColor(Theme.C.border)
+        render.drawRectOutline(cur.x, cur.y, w, h, 1)
+        Theme.setColor(Theme.C.textSecondary)
+        Theme.drawIcon(isOpen and "chevronDown" or "chevronRight", cur.x + 5, cur.y + 5, 12)
+        Theme.setFont(Theme.Fonts.BodyBold)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(cur.x + 22, cur.y + h * 0.5, disp, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        advanceCursor(cur, w, h)
+        return isOpen
+    end
+
+    function ImGui.TreeNode(label, defaultOpen)
+        local cur = currentCursor()
+        if not cur then return false end
+        local ui = ImGui._ui
+        local disp = stripIdSuffix(label)
+        local wid = ImGui.GetID("tree_" .. label)
+        if ImGui._collapsing[wid] == nil then
+            ImGui._collapsing[wid] = (defaultOpen == true)
+        end
+        local isOpen = ImGui._collapsing[wid]
+        local w = math.max(40, cur.contentW - (cur.x - cur.contentX))
+        local h = 20
+
+        local hot, cap = ui:hitTest(wid, cur.x, cur.y, w, h)
+        if hot and ui.leftPressed then ui:capture(wid) end
+        if cap and ui.leftReleased and hot then
+            isOpen = not isOpen
+            ImGui._collapsing[wid] = isOpen
+        end
+
+        if hot then
+            Theme.drawRoundedRect(3, cur.x, cur.y, w, h, Theme.C.bgControlHover, 140)
+        end
+        Theme.setColor(Theme.C.textSecondary)
+        Theme.drawIcon(isOpen and "chevronDown" or "chevronRight", cur.x + 3, cur.y + 4, 12)
+        Theme.setFont(Theme.Fonts.Body)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(cur.x + 20, cur.y + h * 0.5, disp, TEXT_ALIGN.LEFT, TEXT_ALIGN.CENTER)
+
+        advanceCursor(cur, w, h)
+        if isOpen then
+            ImGui.Indent(14)
+            ImGui.PushID(label)
+            ImGui._treeStack[#ImGui._treeStack + 1] = true
+        end
+        return isOpen
+    end
+
+    function ImGui.TreePop()
+        local n = #ImGui._treeStack
+        if n == 0 then return end
+        ImGui._treeStack[n] = nil
+        ImGui.PopID()
+        ImGui.Unindent(14)
+    end
+
+    function ImGui.ProgressBar(fraction, w, h, overlayText)
+        local cur = currentCursor()
+        if not cur then return end
+        local frac = math.clamp(fraction or 0, 0, 1)
+        local pw = (w and w > 0) and w or getItemWidth(cur)
+        local ph = (h and h > 0) and h or 18
+        local r = math.min(4, Theme.Style.frameRounding or 4)
+
+        Theme.drawRoundedRect(r, cur.x, cur.y, pw, ph, Theme.C.bgInput)
+        local fillW = math.floor(pw * frac)
+        if fillW > 2 then
+            Theme.drawRoundedRect(r, cur.x + 1, cur.y + 1, fillW - 2, ph - 2, Theme.C.accent)
+        end
+        Theme.setColor(Theme.C.border)
+        render.drawRectOutline(cur.x, cur.y, pw, ph, 1)
+
+        local label = overlayText or string.format("%d%%", math.floor(frac * 100 + 0.5))
+        Theme.setFont(Theme.Fonts.Small)
+        Theme.setColor(Theme.C.textPrimary)
+        render.drawSimpleText(cur.x + pw * 0.5, cur.y + ph * 0.5, label, TEXT_ALIGN.CENTER, TEXT_ALIGN.CENTER)
+
+        advanceCursor(cur, pw, ph)
+    end
+
+    -- Toast Notification Queue (ImGui.Notify + ImGui.DrawNotifications)
+    function ImGui.Notify(title, message, kind, duration)
+        kind = kind or "info"
+        duration = duration or 3.5
+        local list = ImGui._notifications
+        -- Avoid spamming identical consecutive toasts
+        local top = list[#list]
+        if top and top.title == title and top.message == message and top.age < 0.8 then
+            top.age = 0
+            return
+        end
+        list[#list + 1] = {
+            id = "ntf_" .. tostring(ImGui._frameCount) .. "_" .. tostring(#list + 1),
+            title = tostring(title or "Notice"),
+            message = tostring(message or ""),
+            kind = kind,
+            age = 0,
+            duration = duration,
+        }
+        while #list > 5 do
+            table.remove(list, 1)
+        end
+    end
+
+    function ImGui.DrawNotifications(ui, layout)
+        local list = ImGui._notifications
+        if #list == 0 then return end
+
+        local cardW = 290
+        local cardH = 48
+        local gap = 8
+        local rightEdge = (layout and layout.vp and (layout.vp.x + layout.vp.w - 12)) or (ui.scrW - 14)
+        local baseY = (layout and layout.vp and (layout.vp.y + layout.vp.h - 14)) or (ui.scrH - 18)
+
+        for idx = #list, 1, -1 do
+            local n = list[idx]
+            local rev = #list - idx
+            local fade = 1
+            if n.age < 0.18 then
+                fade = n.age / 0.18
+            elseif (n.duration - n.age) < 0.35 then
+                fade = math.max(0, (n.duration - n.age) / 0.35)
+            end
+            local alpha = math.floor(240 * fade)
+            local x = rightEdge - cardW + math.floor((1 - fade) * 18)
+            local y = baseY - (rev + 1) * cardH - rev * gap
+
+            local col = Theme.C.accent
+            local icon = "info"
+            if n.kind == "success" then
+                col = Theme.C.success
+                icon = "check"
+            elseif n.kind == "warning" then
+                col = Theme.C.warning
+                icon = "warning"
+            elseif n.kind == "error" then
+                col = Theme.C.danger
+                icon = "warning"
+            end
+
+            Theme.drawRoundedRect(5, x, y, cardW, cardH, Theme.C.bgPopup, alpha)
+            Theme.setColor(col, alpha)
+            render.drawRectFast(x, y + 3, 3, cardH - 6)
+            Theme.setColor(Theme.C.borderLight, alpha)
+            render.drawRectOutline(x, y, cardW, cardH, 1)
+
+            Theme.setColor(col, alpha)
+            Theme.drawIcon(icon, x + 12, y + 10, 14)
+
+            Theme.setFont(Theme.Fonts.BodyBold)
+            Theme.setColor(Theme.C.textPrimary, alpha)
+            render.drawSimpleText(x + 32, y + 9, n.title, TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+
+            if n.message ~= "" then
+                Theme.setFont(Theme.Fonts.Small)
+                Theme.setColor(Theme.C.textSecondary, alpha)
+                render.drawSimpleText(x + 32, y + 26, n.message, TEXT_ALIGN.LEFT, TEXT_ALIGN.TOP)
+            end
+
+            local clsHot, _ = ui:hitTest(n.id .. "_cls", x + cardW - 22, y + 6, 16, 16)
+            if clsHot and ui.leftPressed then
+                table.remove(list, idx)
+            else
+                Theme.setColor(clsHot and Theme.C.textPrimary or Theme.C.textMuted, alpha)
+                Theme.drawIcon("hide", x + cardW - 18, y + 8, 10)
+            end
+        end
+    end
+
+    SOLACE.ImGui = ImGui
+
+    -- 13.5 Resizable Dock Layout & Splitters
 
 
     local Layout = {}
@@ -2860,10 +4630,16 @@ do (function(SOLACE)
         end
         local sp = d.splitterSize
         local panels = self.state.panels
+        local fp = self.state.floatingPanels or {}
 
-        local showLeft = panels.toolbox
-        local showRight = panels.explorer or panels.properties
-        local showBottom = panels.timeline
+        local showToolbox = panels.toolbox and not fp.toolbox
+        local showExplorer = panels.explorer and not fp.explorer
+        local showProperties = panels.properties and not fp.properties
+        local showTimeline = panels.timeline and not fp.timeline
+
+        local showLeft = showToolbox
+        local showRight = showExplorer or showProperties
+        local showBottom = showTimeline
 
         local topY = self.toolbarH
         local availH = math.max(200, scrH - topY)
@@ -2914,15 +4690,15 @@ do (function(SOLACE)
         r.viewport = { x = curX, y = topY, w = math.max(0, vpW), h = middleH }
 
         local rightX = curX + r.viewport.w + (showRight and sp or 0)
-        if panels.explorer and panels.properties then
+        if showExplorer and showProperties then
             local expH = math.floor((middleH - sp) * math.clamp(self.explorerRatio, d.minExplorerRatio, d.maxExplorerRatio))
             local propY = topY + expH + sp
             r.explorer = { x = rightX, y = topY, w = activeRightW, h = expH }
             r.properties = { x = rightX, y = propY, w = activeRightW, h = math.max(0, middleH - expH - sp) }
-        elseif panels.explorer then
+        elseif showExplorer then
             r.explorer = { x = rightX, y = topY, w = activeRightW, h = middleH }
             r.properties = { x = 0, y = 0, w = 0, h = 0 }
-        elseif panels.properties then
+        elseif showProperties then
             r.explorer = { x = 0, y = 0, w = 0, h = 0 }
             r.properties = { x = rightX, y = topY, w = activeRightW, h = middleH }
         else
@@ -2958,7 +4734,7 @@ do (function(SOLACE)
                 h = middleH,
             }
         end
-        if panels.explorer and panels.properties then
+        if showExplorer and showProperties then
             self._splitters[#self._splitters + 1] = {
                 id = "split_right_y",
                 axis = "y",
@@ -3198,7 +4974,8 @@ do (function(SOLACE)
             return
         end
 
-        local inViewport = ui:pointInRect(vpRect.x, vpRect.y, vpRect.w, vpRect.h)
+        local overFloating = (ui._topHoverWinId ~= nil) or (SOLACE.ImGui and SOLACE.ImGui.isPointOverAnyWindow and SOLACE.ImGui.isPointOverAnyWindow(ui.mx, ui.my))
+        local inViewport = ui:pointInRect(vpRect.x, vpRect.y, vpRect.w, vpRect.h) and not overFloating
         if ui.rightPressed and inViewport and not ui.activeId and not ui.focusedInputId then
             state.viewportLooking = true
             if hasPermission("input.enablecursor") then
@@ -3322,6 +5099,11 @@ do (function(SOLACE)
         { key = "explorer",   label = "Exp",  tip = "Toggle Explorer Panel" },
         { key = "toolbox",    label = "Box",  tip = "Toggle Toolbox Panel" },
     }
+    local TOOLBAR_WINDOWS = {
+        { key = "console",  label = "Log",   icon = "console", tip = "Toggle Console & Event Log Window" },
+        { key = "settings", label = "Prefs", icon = "sliders", tip = "Toggle Studio & ImGui Theme Settings Window" },
+        { key = "demo",     label = "ImGui", icon = "sparkle", tip = "Toggle Dear ImGui Widget Showcase Window" },
+    }
 
     function Toolbar.draw(ui, state, layout, rect, actions)
         local x, y, w, h = rect.x, rect.y, rect.w, rect.h
@@ -3338,7 +5120,7 @@ do (function(SOLACE)
         local by = y + math.floor((h - btnH) * 0.5)
         local compactBar = (w < 1440)
 
-        -- Right-aligned working panel toggles, Reset Layout & Hide Studio (F6) first so left side knows exact maxLeftX
+        -- Right-aligned working panel toggles, ImGui windows, Reset Layout & Hide Studio (F6)
         local rx = x + w - 8
 
         local hideW = compactBar and 68 or 78
@@ -3355,9 +5137,18 @@ do (function(SOLACE)
         rx = rx - resetW
         if Widgets.button(ui, "tb_reset_layout", rx, by, resetW, btnH, "Reset", {
             icon = "reset",
-            tooltip = "Reset all dock panel sizes to default",
+            tooltip = "Reset all dock panel sizes and re-dock floating panels",
         }) then
             layout:reset()
+            if state.floatingPanels then
+                state.floatingPanels.toolbox = false
+                state.floatingPanels.explorer = false
+                state.floatingPanels.properties = false
+                state.floatingPanels.timeline = false
+            end
+            if SOLACE.ImGui and SOLACE.ImGui.Notify then
+                SOLACE.ImGui.Notify("Layout Reset", "Restored default docked studio layout", "info", 2.5)
+            end
         end
         rx = rx - 6
 
@@ -3373,6 +5164,28 @@ do (function(SOLACE)
                 end
             end
             rx = rx - 3
+        end
+
+        rx = rx - 5
+        local winBtnW = compactBar and 46 or 58
+        if state.windows then
+            for _, witem in ipairs(TOOLBAR_WINDOWS) do
+                rx = rx - winBtnW
+                if rx > x + 90 then
+                    if Widgets.button(ui, "tb_win_" .. witem.key, rx, by, winBtnW, btnH, witem.label, {
+                        icon = compactBar and nil or witem.icon,
+                        active = state.windows[witem.key],
+                        tooltip = witem.tip,
+                    }) then
+                        local nextOpen = not state.windows[witem.key]
+                        state.windows[witem.key] = nextOpen
+                        if nextOpen and SOLACE.ImGui then
+                            SOLACE.ImGui.bringToFront("win_" .. witem.key)
+                        end
+                    end
+                end
+                rx = rx - 3
+            end
         end
 
         local maxLeftX = rx - 8
@@ -3526,7 +5339,7 @@ do (function(SOLACE)
         [Constants.NODE_KINDS.DECAL]    = "stamp",
     }
 
-    function Explorer.draw(ui, state, sceneGraph, rect, actions)
+    function Explorer.draw(ui, state, sceneGraph, rect, actions, opts)
         if rect.w <= 0 or rect.h <= 0 then return end
 
         local count = sceneGraph:getNodeCount()
@@ -3534,7 +5347,21 @@ do (function(SOLACE)
             Explorer._lastCount = count
             Explorer._countStr = string.format("%d node%s", count, count == 1 and "" or "s")
         end
-        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Explorer", Explorer._countStr)
+        local bx, by, bw, bh
+        if opts and opts.hideFrame then
+            bx, by, bw, bh = rect.x, rect.y, rect.w, rect.h
+        else
+            bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Explorer", Explorer._countStr, {
+                ui = ui,
+                undockId = "exp_undock",
+                onUndock = function()
+                    if state.floatingPanels then
+                        state.floatingPanels.explorer = true
+                        if SOLACE.ImGui then SOLACE.ImGui.bringToFront("win_panel_explorer") end
+                    end
+                end,
+            })
+        end
         if bw < 20 or bh < 60 then return end
 
         local pad = Theme.Metrics.pad
@@ -3751,7 +5578,7 @@ do (function(SOLACE)
         return str
     end
 
-    function Properties.draw(ui, state, sceneGraph, runtime, camera, rect, actions)
+    function Properties.draw(ui, state, sceneGraph, runtime, camera, rect, actions, opts)
         if rect.w <= 0 or rect.h <= 0 then return end
 
         local sel = sceneGraph:getSelectedNode()
@@ -3766,7 +5593,21 @@ do (function(SOLACE)
         else
             rightLabel = sel and sel.name or "No Selection"
         end
-        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Properties", rightLabel)
+        local bx, by, bw, bh
+        if opts and opts.hideFrame then
+            bx, by, bw, bh = rect.x, rect.y, rect.w, rect.h
+        else
+            bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Properties", rightLabel, {
+                ui = ui,
+                undockId = "prop_undock",
+                onUndock = function()
+                    if state.floatingPanels then
+                        state.floatingPanels.properties = true
+                        if SOLACE.ImGui then SOLACE.ImGui.bringToFront("win_panel_properties") end
+                    end
+                end,
+            })
+        end
         if bw < 20 or bh < 40 then return end
         Properties._viewH = bh
 
@@ -4154,7 +5995,7 @@ do (function(SOLACE)
         return opts[idx]
     end
 
-    function Timeline.draw(ui, state, sceneGraph, rect)
+    function Timeline.draw(ui, state, sceneGraph, rect, opts)
         if rect.w <= 0 or rect.h <= 0 then return end
 
         local tl = state.timeline
@@ -4173,7 +6014,21 @@ do (function(SOLACE)
             )
         end
 
-        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Timeline", Timeline._badgeStr)
+        local bx, by, bw, bh
+        if opts and opts.hideFrame then
+            bx, by, bw, bh = rect.x, rect.y, rect.w, rect.h
+        else
+            bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Timeline", Timeline._badgeStr, {
+                ui = ui,
+                undockId = "tl_undock",
+                onUndock = function()
+                    if state.floatingPanels then
+                        state.floatingPanels.timeline = true
+                        if SOLACE.ImGui then SOLACE.ImGui.bringToFront("win_panel_timeline") end
+                    end
+                end,
+            })
+        end
         if bw < 160 or bh < 60 then return end
 
         ui:pushClip(bx, by, bw, bh)
@@ -4464,10 +6319,24 @@ do (function(SOLACE)
         return list
     end
 
-    function Toolbox.draw(ui, state, rect, actions)
+    function Toolbox.draw(ui, state, rect, actions, opts)
         if rect.w <= 0 or rect.h <= 0 then return end
 
-        local bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Toolbox", "Create")
+        local bx, by, bw, bh
+        if opts and opts.hideFrame then
+            bx, by, bw, bh = rect.x, rect.y, rect.w, rect.h
+        else
+            bx, by, bw, bh = Widgets.panelFrame(rect.x, rect.y, rect.w, rect.h, "Toolbox", "Create", {
+                ui = ui,
+                undockId = "tbx_undock",
+                onUndock = function()
+                    if state.floatingPanels then
+                        state.floatingPanels.toolbox = true
+                        if SOLACE.ImGui then SOLACE.ImGui.bringToFront("win_panel_toolbox") end
+                    end
+                end,
+            })
+        end
         if bw < 20 or bh < 40 then return end
         Toolbox._viewH = bh
 
@@ -4727,6 +6596,373 @@ do (function(SOLACE)
 end)(SOLACE) end
 
 -- ============================================================================
+-- SECTION 17.5: Floating Dear ImGui windows & undocked panel hosts
+-- ============================================================================
+do (function(SOLACE)
+    local Theme    = SOLACE.Theme
+    local ImGui    = SOLACE.ImGui
+    local Toolbox  = SOLACE.Toolbox
+    local Explorer = SOLACE.Explorer
+    local Properties = SOLACE.Properties
+    local Timeline = SOLACE.Timeline
+
+    local Windows = {
+        _demo = {
+            chk = true,
+            radio = 1,
+            fval = 42.5,
+            ival = 16,
+            dval = 3.14,
+            vec = { 10, 20, 30 },
+            comboIdx = 1,
+            text = "Hello ImGui!",
+            progress = 0.68,
+            selIdx = 2,
+            clickCount = 0,
+        },
+        _consoleFilter = "",
+        _consoleTab = "All",
+    }
+
+    local THEME_KEYS = { "dark", "classic", "light" }
+    local THEME_LABELS = { "ImGui Dark", "ImGui Classic", "ImGui Light" }
+    local COMBO_PRESETS = { "Default Studio", "Minimal Viewport", "High Contrast", "Cinematic" }
+    local SELECTABLE_ITEMS = { "Scene Root", "Cube Hologram", "Key Light", "Camera Rig", "Timeline Track" }
+
+    local function drawDemoWindow(ui, state)
+        local d = Windows._demo
+        local vis, open = ImGui.Begin("win_demo", "Dear ImGui Widget Showcase", state.windows.demo, {
+            x = 290, y = 78, w = 390, h = 480, minW = 280, minH = 240,
+        })
+        if not open then
+            state.windows.demo = false
+        end
+        if not vis then
+            if open then ImGui.End() end
+            return
+        end
+
+        ImGui.TextColored(Theme.C.accentBright, "SOLACE.ImGui Native Immediate-Mode UI")
+        ImGui.TextDisabled("Drag titlebar, resize bottom-right grip, click to raise Z-order.")
+        ImGui.Separator()
+
+        if ImGui.BeginTabBar("demo_tabs") then
+            if ImGui.BeginTabItem("Widgets") then
+                if ImGui.CollapsingHeader("Buttons & Toggles", true) then
+                    if ImGui.Button("Action Button") then
+                        d.clickCount = d.clickCount + 1
+                        ImGui.Notify("ImGui Button", "Clicked " .. d.clickCount .. " time(s)", "info", 2.4)
+                    end
+                    ImGui.SameLine()
+                    if ImGui.SmallButton("Reset##demo_rst") then
+                        d.clickCount = 0
+                        d.fval = 42.5
+                        d.ival = 16
+                    end
+                    ImGui.SameLine()
+                    ImGui.TextDisabled("Count: " .. d.clickCount)
+
+                    d.chk = ImGui.Checkbox("Enable Feature Checkbox", d.chk)
+
+                    if ImGui.RadioButton("Mode A", d.radio == 1) then d.radio = 1 end
+                    ImGui.SameLine()
+                    if ImGui.RadioButton("Mode B", d.radio == 2) then d.radio = 2 end
+                    ImGui.SameLine()
+                    if ImGui.RadioButton("Mode C", d.radio == 3) then d.radio = 3 end
+                end
+
+                ImGui.Spacing(4)
+                if ImGui.CollapsingHeader("Sliders, Drag & Dropdowns", true) then
+                    d.fval = ImGui.SliderFloat("Float Slider", d.fval, 0, 100, "%.1f")
+                    d.ival = ImGui.SliderInt("Int Slider", d.ival, 1, 64, "%d")
+                    d.dval = ImGui.DragFloat("Drag Float", d.dval, 0.05, -100, 100, "%.2f")
+                    local nx, ny, nz = ImGui.DragFloat3("Sample Vec3", d.vec[1], d.vec[2], d.vec[3], 0.5, "%.1f")
+                    d.vec[1], d.vec[2], d.vec[3] = nx, ny, nz
+                    d.comboIdx = ImGui.Combo("Preset", d.comboIdx, COMBO_PRESETS, 6)
+                    d.text = ImGui.InputText("Text Input", d.text, "Type text...")
+                    d.progress = ImGui.SliderFloat("Progress", d.progress, 0, 1, "%.2f")
+                    ImGui.ProgressBar(d.progress, 0, 18, string.format("Bake %d%%", math.floor(d.progress * 100 + 0.5)))
+                end
+                ImGui.EndTabItem()
+            end
+
+            if ImGui.BeginTabItem("Trees & Lists") then
+                ImGui.Text("Hierarchical TreeNode Demo:")
+                if ImGui.TreeNode("Studio Scene Root", true) then
+                    ImGui.BulletText("Hologram Layer (active)")
+                    if ImGui.TreeNode("Lighting Rig", false) then
+                        ImGui.BulletText("Key Light (45 deg)")
+                        ImGui.BulletText("Rim Light (cool)")
+                        ImGui.TreePop()
+                    end
+                    ImGui.TreePop()
+                end
+                ImGui.Separator()
+                ImGui.Text("Scrollable Child Selectables:")
+                if ImGui.BeginChild("demo_list_child", 0, 130, true) then
+                    for idx, name in ipairs(SELECTABLE_ITEMS) do
+                        if ImGui.Selectable(name .. "##sel_" .. idx, d.selIdx == idx) then
+                            d.selIdx = idx
+                        end
+                    end
+                    ImGui.EndChild()
+                end
+                ImGui.EndTabItem()
+            end
+
+            if ImGui.BeginTabItem("Notifications") then
+                ImGui.TextWrapped("Trigger Dear ImGui toast notifications stacked cleanly over the viewport:")
+                ImGui.Spacing(4)
+                if ImGui.Button("Info Toast", 130) then
+                    ImGui.Notify("Info Notice", "Viewport grid updated cleanly.", "info", 3.2)
+                end
+                ImGui.SameLine()
+                if ImGui.Button("Success Toast", 130) then
+                    ImGui.Notify("Operation Complete", "Scene node spawned in 3D space.", "success", 3.2)
+                end
+                if ImGui.Button("Warning Toast", 130) then
+                    ImGui.Notify("Quota Advisory", "CPU budget at 65% threshold.", "warning", 3.5)
+                end
+                ImGui.SameLine()
+                if ImGui.Button("Error Toast", 130) then
+                    ImGui.Notify("Validation Error", "Sample error notification test.", "error", 3.5)
+                end
+                ImGui.EndTabItem()
+            end
+
+            ImGui.EndTabBar()
+        end
+
+        ImGui.End()
+    end
+
+    local function drawSettingsWindow(ui, state, layout)
+        local vis, open = ImGui.Begin("win_settings", "Studio & ImGui Settings", state.windows.settings, {
+            x = 700, y = 78, w = 360, h = 440, minW = 260, minH = 220,
+        })
+        if not open then
+            state.windows.settings = false
+        end
+        if not vis then
+            if open then ImGui.End() end
+            return
+        end
+
+        if ImGui.CollapsingHeader("Appearance & Dear ImGui Style", true) then
+            local curThemeIdx = 1
+            for i, k in ipairs(THEME_KEYS) do
+                if k == state.uiTheme then curThemeIdx = i break end
+            end
+            local newThemeIdx, themeChanged = ImGui.Combo("Theme", curThemeIdx, THEME_LABELS, 4)
+            if themeChanged then
+                state.uiTheme = THEME_KEYS[newThemeIdx] or "dark"
+                Theme.applyTheme(state.uiTheme, state.uiRounding)
+                ImGui.Notify("Theme Changed", "Applied " .. (THEME_LABELS[newThemeIdx] or "ImGui Dark"), "success", 2.5)
+            end
+
+            local newRound, roundChanged = ImGui.SliderInt("Rounding", state.uiRounding or 4, 0, 8, "%d px")
+            if roundChanged then
+                state.uiRounding = newRound
+                Theme.applyTheme(state.uiTheme, state.uiRounding)
+            end
+        end
+
+        ImGui.Spacing(4)
+        if ImGui.CollapsingHeader("Workspace Panels & Undocking", true) then
+            local p = state.panels
+            local fp = state.floatingPanels
+            p.toolbox = ImGui.Checkbox("Show Toolbox", p.toolbox)
+            ImGui.SameLine(180)
+            fp.toolbox = ImGui.Checkbox("Float##flt_tbx", fp.toolbox)
+
+            p.explorer = ImGui.Checkbox("Show Explorer", p.explorer)
+            ImGui.SameLine(180)
+            fp.explorer = ImGui.Checkbox("Float##flt_exp", fp.explorer)
+
+            p.properties = ImGui.Checkbox("Show Properties", p.properties)
+            ImGui.SameLine(180)
+            fp.properties = ImGui.Checkbox("Float##flt_prop", fp.properties)
+
+            p.timeline = ImGui.Checkbox("Show Timeline", p.timeline)
+            ImGui.SameLine(180)
+            fp.timeline = ImGui.Checkbox("Float##flt_tl", fp.timeline)
+
+            if ImGui.Button("Dock All & Reset Layout", 200) then
+                fp.toolbox = false
+                fp.explorer = false
+                fp.properties = false
+                fp.timeline = false
+                layout:reset()
+                ImGui.Notify("Layout Restored", "All panels docked to default layout", "info", 2.5)
+            end
+        end
+
+        ImGui.Spacing(4)
+        if ImGui.CollapsingHeader("Freecam & Viewport", true) then
+            local cam = state.camera
+            cam.speed = ImGui.SliderInt("Cam Speed", cam.speed, 40, 2000, "%d u/s")
+            cam.fov = ImGui.SliderInt("Field of View", cam.fov, 45, 110, "%d deg")
+            cam.sensitivity = ImGui.SliderFloat("Mouse Sens", cam.sensitivity, 0.04, 0.50, "%.2f")
+            local g = state.grid
+            g.enabled = ImGui.Checkbox("Show 3D Ground Grid", g.enabled)
+            g.showAxes = ImGui.Checkbox("Show 3D Origin Axes", g.showAxes)
+            g.showTelemetry = ImGui.Checkbox("Show Telemetry HUD", g.showTelemetry)
+        end
+
+        ImGui.End()
+    end
+
+    local function drawConsoleWindow(ui, state, events)
+        local vis, open = ImGui.Begin("win_console", "Console & Event Log", state.windows.console, {
+            x = 290, y = 576, w = 520, h = 230, minW = 300, minH = 150,
+        })
+        if not open then
+            state.windows.console = false
+        end
+        if not vis then
+            if open then ImGui.End() end
+            return
+        end
+
+        Windows._consoleFilter = ImGui.InputText("Filter", Windows._consoleFilter, "Filter events...")
+        if ImGui.SmallButton("Clear Log") then
+            events:clearLogs()
+        end
+        ImGui.SameLine()
+        if ImGui.SmallButton("Emit Test Event") then
+            events:log("info", "Manual diagnostic checkpoint logged")
+            ImGui.Notify("Console", "Checkpoint added to Event Log", "info", 2.0)
+        end
+
+        if ImGui.BeginTabBar("console_tabs") then
+            if ImGui.BeginTabItem("All") then Windows._consoleTab = "All"; ImGui.EndTabItem() end
+            if ImGui.BeginTabItem("Info") then Windows._consoleTab = "info"; ImGui.EndTabItem() end
+            if ImGui.BeginTabItem("Warn/Err") then Windows._consoleTab = "warn"; ImGui.EndTabItem() end
+            ImGui.EndTabBar()
+        end
+
+        if ImGui.BeginChild("console_body", 0, 0, true) then
+            local logs = events:getLogs()
+            local q = string.lower(Windows._consoleFilter or "")
+            local tab = Windows._consoleTab
+            for i = #logs, 1, -1 do
+                local e = logs[i]
+                local matchTab = (tab == "All") or (tab == "info" and e.level == "info") or (tab == "warn" and e.level ~= "info")
+                local matchText = (q == "") or (string.find(string.lower(e.text), q, 1, true) ~= nil)
+                if matchTab and matchText then
+                    local col = Theme.C.textSecondary
+                    if e.level == "warning" then col = Theme.C.warning
+                    elseif e.level == "error" then col = Theme.C.danger end
+                    ImGui.TextColored(col, string.format("[%.1fs] %s", e.time or 0, e.text))
+                end
+            end
+            ImGui.EndChild()
+        end
+
+        ImGui.End()
+    end
+
+    local function drawFloatingPanel(id, title, key, defaultRect, state, drawInner)
+        if not state.panels[key] or not state.floatingPanels[key] then return end
+        local vis, open = ImGui.Begin(id, title, true, {
+            x = defaultRect.x,
+            y = defaultRect.y,
+            w = defaultRect.w,
+            h = defaultRect.h,
+            minW = defaultRect.minW or 200,
+            minH = defaultRect.minH or 140,
+            onDock = function()
+                state.floatingPanels[key] = false
+                ImGui.Notify("Panel Docked", title .. " docked back into workspace", "info", 2.0)
+            end,
+        })
+        if not open then
+            state.panels[key] = false
+        end
+        if vis then
+            local win = ImGui.getWindow(id)
+            local titleH = Theme.Style.titleBarH or 24
+            local innerRect = {
+                x = win.x + 1,
+                y = win.y + titleH + 1,
+                w = math.max(0, win.w - 2),
+                h = math.max(0, win.h - titleH - 2),
+            }
+            drawInner(innerRect)
+        end
+        if open then
+            ImGui.End()
+        end
+    end
+
+    local WINDOW_SPECS = {
+        { id = "win_panel_toolbox", isOpen = function(s) return s.panels.toolbox and s.floatingPanels.toolbox end,
+          draw = function(ui, s, _, _, _, _, _, actions)
+              drawFloatingPanel("win_panel_toolbox", "Toolbox", "toolbox", { x = 24, y = 68, w = 250, h = 480 }, s, function(r)
+                  Toolbox.draw(ui, s, r, actions, { hideFrame = true })
+              end)
+          end },
+        { id = "win_panel_explorer", isOpen = function(s) return s.panels.explorer and s.floatingPanels.explorer end,
+          draw = function(ui, s, _, sg, _, _, _, actions)
+              drawFloatingPanel("win_panel_explorer", "Explorer", "explorer", { x = 1040, y = 68, w = 280, h = 320 }, s, function(r)
+                  Explorer.draw(ui, s, sg, r, actions, { hideFrame = true })
+              end)
+          end },
+        { id = "win_panel_properties", isOpen = function(s) return s.panels.properties and s.floatingPanels.properties end,
+          draw = function(ui, s, _, sg, rt, cam, _, actions)
+              drawFloatingPanel("win_panel_properties", "Properties", "properties", { x = 1040, y = 400, w = 290, h = 380 }, s, function(r)
+                  Properties.draw(ui, s, sg, rt, cam, r, actions, { hideFrame = true })
+              end)
+          end },
+        { id = "win_panel_timeline", isOpen = function(s) return s.panels.timeline and s.floatingPanels.timeline end,
+          draw = function(ui, s, _, sg)
+              drawFloatingPanel("win_panel_timeline", "Timeline", "timeline", { x = 120, y = 640, w = 860, h = 200, minW = 360 }, s, function(r)
+                  Timeline.draw(ui, s, sg, r, { hideFrame = true })
+              end)
+          end },
+        { id = "win_demo", isOpen = function(s) return s.windows and s.windows.demo end,
+          draw = function(ui, s) drawDemoWindow(ui, s) end },
+        { id = "win_settings", isOpen = function(s) return s.windows and s.windows.settings end,
+          draw = function(ui, s, layout) drawSettingsWindow(ui, s, layout) end },
+        { id = "win_console", isOpen = function(s) return s.windows and s.windows.console end,
+          draw = function(ui, s, _, _, _, _, events) drawConsoleWindow(ui, s, events) end },
+    }
+
+    local SPEC_BY_ID = {}
+    for _, sp in ipairs(WINDOW_SPECS) do
+        SPEC_BY_ID[sp.id] = sp
+    end
+
+    function Windows.drawAll(ui, state, layout, sceneGraph, runtime, camera, events, actions)
+        local drawn = {}
+        local z = ImGui._zOrder
+        -- Snapshot Z-order so click-to-front mid-frame doesn't skip or double-draw a window
+        local orderCopy = {}
+        for i = 1, #z do
+            orderCopy[i] = z[i]
+        end
+
+        for i = 1, #orderCopy do
+            local id = orderCopy[i]
+            local sp = SPEC_BY_ID[id]
+            if sp and sp.isOpen(state) then
+                sp.draw(ui, state, layout, sceneGraph, runtime, camera, events, actions)
+                drawn[id] = true
+            end
+        end
+
+        -- Draw any newly opened windows not yet in _zOrder
+        for _, sp in ipairs(WINDOW_SPECS) do
+            if not drawn[sp.id] and sp.isOpen(state) then
+                sp.draw(ui, state, layout, sceneGraph, runtime, camera, events, actions)
+            end
+        end
+    end
+
+    SOLACE.Windows = Windows
+end)(SOLACE) end
+
+-- ============================================================================
 -- SECTION 18: Project serialization (Phase 12)
 -- ============================================================================
 do (function(SOLACE)
@@ -4772,6 +7008,8 @@ do (function(SOLACE)
     local Explorer     = SOLACE.Explorer
     local Properties   = SOLACE.Properties
     local Timeline     = SOLACE.Timeline
+    local ImGui        = SOLACE.ImGui
+    local Windows      = SOLACE.Windows
 
 
 
@@ -5175,7 +7413,7 @@ do (function(SOLACE)
             c.created = true
         end
 
-        local inPanel = ui:pointInRect(rect.x, rect.y, w, h)
+        local inPanel = ui:pointInRect(rect.x, rect.y, w, h) and (ui._topHoverWinId == nil)
         local pointerChanged = (ui.dx ~= 0 or ui.dy ~= 0 or ui.leftPressed or ui.leftReleased or ui.leftDown or ui.middlePressed or ui.wheelDelta ~= 0)
         local dirty = (w ~= c.w) or (h ~= c.h) or (sig ~= c.sig)
             or (inPanel and (pointerChanged or not c.wasInPanel))
@@ -5198,6 +7436,8 @@ do (function(SOLACE)
             if numStrips == 1 then
                 ui.mx = realMx - rect.x
                 ui.my = realMy - rect.y
+                ui._rtOffsetX = rect.x
+                ui._rtOffsetY = rect.y
                 c.localRect.x = 0
                 c.localRect.y = 0
                 c.localRect.w = w
@@ -5209,7 +7449,9 @@ do (function(SOLACE)
                     local offY = s * (h + 2)
                     local stripW = math.min(1024, w - offX)
                     ui.mx = realMx - rect.x - offX
-                    ui.my = realMy - rect.y - offY
+                    ui.my = realMy - rect.y + offY
+                    ui._rtOffsetX = rect.x + offX
+                    ui._rtOffsetY = rect.y - offY
                     c.localRect.x = -offX
                     c.localRect.y = offY
                     c.localRect.w = w
@@ -5219,6 +7461,8 @@ do (function(SOLACE)
                     ui:popClip()
                 end
             end
+            ui._rtOffsetX = 0
+            ui._rtOffsetY = 0
             ui.mx = realMx
             ui.my = realMy
             render.selectRenderTarget(nil)
@@ -5353,6 +7597,7 @@ do (function(SOLACE)
         local ok, err = pcall(function()
             syncCursor()
             ui:beginFrame(dt)
+            ImGui.beginFrame(ui, state, dt)
             layout:compute(ui.scrW, ui.scrH)
 
             local rects = layout.rects
@@ -5372,24 +7617,28 @@ do (function(SOLACE)
             local actPrefix3 = actId and string.sub(actId, 1, 3) or ""
             local actPrefix4 = actId and string.sub(actId, 1, 4) or ""
             local allowRepaint = (not overlayPaused) and (cpuRatio < 0.60)
+            local tv = Theme._version or 1
 
             -- Draw docked studio panels around the live center 3D viewport cutout (1:1 RT cached when idle)
-            local tbSig = state.activeTool .. ":" .. tostring(actions.hasSelection)
+            local winFlags = state.windows and (tostring(state.windows.demo) .. tostring(state.windows.settings) .. tostring(state.windows.console)) or ""
+            local fltFlags = state.floatingPanels and (tostring(state.floatingPanels.toolbox) .. tostring(state.floatingPanels.explorer) .. tostring(state.floatingPanels.properties) .. tostring(state.floatingPanels.timeline)) or ""
+            local tbSig = tv .. "|" .. state.activeTool .. ":" .. tostring(actions.hasSelection)
                 .. ":" .. tostring(state.grid.enabled) .. tostring(state.grid.showAxes) .. tostring(state.grid.showTelemetry)
                 .. ":" .. tostring(state.panels.toolbox) .. tostring(state.panels.explorer) .. tostring(state.panels.properties) .. tostring(state.panels.timeline)
+                .. ":" .. winFlags .. ":" .. fltFlags
             drawCachedPanel("toolbar", rects.toolbar, tbSig, actPrefix3 == "tb_", allowRepaint, function(r)
                 Toolbar.draw(ui, state, layout, r, actions)
             end)
 
             local tbxFocus = (focId == "toolbox_search" or focId == "tbx_custom_mdl")
-            local tbxSig = state.activeToolboxCategory .. "|" .. state.toolboxSearch .. "|" .. state.customModelPath
+            local tbxSig = tv .. "|" .. state.activeToolboxCategory .. "|" .. state.toolboxSearch .. "|" .. state.customModelPath
                 .. "|" .. tostring(Toolbox._scrollY) .. "|" .. (tbxFocus and (focId .. ":" .. blinkPhase) or "")
             drawCachedPanel("toolbox", rects.toolbox, tbxSig, actPrefix4 == "tbx_" or actPrefix4 == "tool", allowRepaint, function(r)
                 Toolbox.draw(ui, state, r, actions)
             end)
 
             local expFocus = (focId == "explorer_search")
-            local expSig = sceneGraph._version .. "|" .. tostring(sel and sel.id) .. "|" .. #selIds
+            local expSig = tv .. "|" .. sceneGraph._version .. "|" .. tostring(sel and sel.id) .. "|" .. #selIds
                 .. "|" .. state.explorerSearch .. "|" .. tostring(Explorer._scrollY) .. "|" .. (expFocus and blinkPhase or "")
             drawCachedPanel("explorer", rects.explorer, expSig, actPrefix4 == "exp_" or actPrefix4 == "expl", allowRepaint, function(r)
                 Explorer.draw(ui, state, sceneGraph, r, actions)
@@ -5402,7 +7651,7 @@ do (function(SOLACE)
             local c = state.camera
             local g = state.grid
             local s = state.sections
-            local propSig = sceneGraph._version .. "|" .. tostring(sel and sel.id) .. "|" .. tostring(sel and sel.name)
+            local propSig = tv .. "|" .. sceneGraph._version .. "|" .. tostring(sel and sel.id) .. "|" .. tostring(sel and sel.name)
                 .. "|" .. tostring(sel and sel.visible) .. "|" .. #selIds .. "|" .. selXform
                 .. "|" .. c.speed .. ":" .. c.boostMult .. ":" .. c.sensitivity .. ":" .. c.fov .. ":" .. c.smoothing
                 .. "|" .. tostring(g.enabled) .. ":" .. g.spacing .. ":" .. g.halfExtents .. ":" .. g.originMode
@@ -5416,7 +7665,7 @@ do (function(SOLACE)
             end)
 
             local tl = state.timeline
-            local tlSig = sceneGraph._version .. "|" .. tostring(sel and sel.id)
+            local tlSig = tv .. "|" .. sceneGraph._version .. "|" .. tostring(sel and sel.id)
                 .. "|" .. tl.currentTime .. "|" .. tl.duration .. "|" .. tl.fps .. "|" .. tl.zoom .. "|" .. tl.scrollTime
             drawCachedPanel("timeline", rects.timeline, tlSig, actPrefix3 == "tl_", allowRepaint, function(r)
                 Timeline.draw(ui, state, sceneGraph, r)
@@ -5429,8 +7678,16 @@ do (function(SOLACE)
                 -- Draw interactive panel splitters on top of panel borders
                 layout:updateAndDrawSplitters(ui)
 
-                -- Viewport raycast hover & click selection (only when no UI widget/splitter is hovered/active)
-                if ui.hotId == nil and ui.activeId == nil and not ui.autoScroll and not ui._autoScrollConsumed then
+                -- Draw floating Dear ImGui windows (Z-ordered bottom-to-top) and undocked panels
+                Windows.drawAll(ui, state, layout, sceneGraph, runtime, camera, events, actions)
+
+                -- Draw active dropdown popups & toast notifications on top of everything
+                ImGui.DrawPopups(ui)
+                ImGui.DrawNotifications(ui, layout)
+
+                -- Viewport raycast hover & click selection (only when no UI widget/splitter/floating window is hovered/active)
+                if ui.hotId == nil and ui.activeId == nil and not ui.autoScroll and not ui._autoScrollConsumed
+                    and not ImGui.isPointOverAnyWindow(ui.mx, ui.my) then
                     Selection.pickAtCursor(ui, state, camera, sceneGraph, runtime, rects.viewport)
                     Selection.handleClick(ui, state, camera, sceneGraph, runtime, rects.viewport)
                 else
