@@ -2531,7 +2531,7 @@ do (function(SOLACE)
     function UIManager:isMouseInClip()
         local top = self._clipStack[#self._clipStack]
         if not top then return true end
-        return self.mx >= top[1] and self.mx <= top[3] and self.my >= top[2] and self.my <= top[4]
+        return self.mx >= top[1] and self.mx < top[3] and self.my >= top[2] and self.my < top[4]
     end
 
     function UIManager:hitTest(id, x, y, w, h)
@@ -2547,7 +2547,7 @@ do (function(SOLACE)
         if inside and canHover then
             self.hotId = id
         end
-        local isHot = (self.hotId == id)
+        local isHot = inside and (self.hotId == id)
         return isHot, isActive
     end
 
@@ -5101,8 +5101,8 @@ do (function(SOLACE)
     }
     local TOOLBAR_WINDOWS = {
         { key = "console",  label = "Log",   icon = "console", tip = "Toggle Console & Event Log Window" },
-        { key = "settings", label = "Prefs", icon = "sliders", tip = "Toggle Studio & ImGui Theme Settings Window" },
-        { key = "demo",     label = "ImGui", icon = "sparkle", tip = "Toggle Dear ImGui Widget Showcase Window" },
+        { key = "settings", label = "Prefs", icon = "sliders", tip = "Toggle Studio & ImGui Theme/Style Settings Window" },
+        { key = "demo",     label = "ImGui", icon = "sparkle", tip = "Toggle Dear ImGui Widget Showcase (Use Prefs to change Theme/Style)" },
     }
 
     function Toolbar.draw(ui, state, layout, rect, actions)
@@ -6644,6 +6644,10 @@ do (function(SOLACE)
 
         ImGui.TextColored(Theme.C.accentBright, "SOLACE.ImGui Native Immediate-Mode UI")
         ImGui.TextDisabled("Drag titlebar, resize bottom-right grip, click to raise Z-order.")
+        if ImGui.SmallButton("Open ImGui Theme & Style (Prefs)") then
+            state.windows.settings = true
+            ImGui.bringToFront("win_settings")
+        end
         ImGui.Separator()
 
         if ImGui.BeginTabBar("demo_tabs") then
@@ -7444,10 +7448,13 @@ do (function(SOLACE)
                 c.localRect.h = h
                 drawFn(c.localRect)
             else
+                local stripHotId, stripTip = nil, nil
                 for s = 0, numStrips - 1 do
                     local offX = s * 1024
                     local offY = s * (h + 2)
                     local stripW = math.min(1024, w - offX)
+                    ui.hotId = nil
+                    ui._tooltipText = nil
                     ui.mx = realMx - rect.x - offX
                     ui.my = realMy - rect.y + offY
                     ui._rtOffsetX = rect.x + offX
@@ -7459,7 +7466,11 @@ do (function(SOLACE)
                     ui:pushClip(0, offY, stripW, h)
                     drawFn(c.localRect)
                     ui:popClip()
+                    if ui.hotId ~= nil then stripHotId = ui.hotId end
+                    if ui._tooltipText ~= nil then stripTip = ui._tooltipText end
                 end
+                ui.hotId = stripHotId
+                ui._tooltipText = stripTip
             end
             ui._rtOffsetX = 0
             ui._rtOffsetY = 0
